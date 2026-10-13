@@ -1,0 +1,12 @@
+import { NextResponse } from 'next/server';
+import yahooFinance from 'yahoo-finance2';
+
+export async function GET() {
+  try {
+    const queryOptions = { period1: '2026-01-01', interval: '1d' };
+    const result = await yahooFinance.historical('^GSPC', queryOptions);
+    return NextResponse.json(result);
+  } catch (error) {
+    return NextResponse.json({ error: 'Failed to fetch data' }, { status: 500 });
+  }
+}

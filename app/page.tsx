@@ -1,6 +1,6 @@
 'use client';
-import { useEffect, useMemo, useState } from 'react';
-import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Area, AreaChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { calculatePortfolio, type Transaction, type Quote } from '@/lib/portfolio';
 
 const initialTransactions: Transaction[] = [
@@ -30,6 +30,9 @@ export default function Home() {
   const [transactions,setTransactions] = useState<Transaction[]>(initialTransactions);
   const [transactionHistory,setTransactionHistory] = useState<Transaction[]>(initialTransactions);
   const [quotes,setQuotes] = useState<Record<string,Quote>>({});
+  const [sectors,setSectors] = useState<Record<string,string | null>>({});
+  const [sectorErrors,setSectorErrors] = useState<string[]>([]);
+  const [isLoadingSectors,setIsLoadingSectors] = useState(false);
   const [eurUsdRate,setEurUsdRate] = useState<number | null>(null);
   const [isRefreshingQuotes,setIsRefreshingQuotes] = useState(false);
   const [showAdd,setShowAdd] = useState(false);
@@ -56,10 +59,10 @@ export default function Home() {
   const [depositForm,setDepositForm] = useState({date:new Date().toISOString().slice(0,10),value:''});
   const [form,setForm] = useState({date:new Date().toISOString().slice(0,10),ticker:'',company:'',type:'BUY',quantity:'',price:'',fees:'0',currency:'USD'});
   const portfolio = useMemo(()=>calculatePortfolio(transactions,quotes),[transactions,quotes]);
-  const convertToUSD = (amount:number,currency:string):number|null => {
+  const convertToUSD = useCallback((amount:number,currency:string):number|null => {
     if (currency !== 'EUR') return amount;
     return eurUsdRate !== null ? amount * eurUsdRate : null;
-  };
+  }, [eurUsdRate]);
   const totalPortfolioMarketCost = useMemo(() => {
     let total = 0;
     for (const holding of portfolio.holdings) {
@@ -68,7 +71,7 @@ export default function Home() {
       total += amount;
     }
     return total;
-  }, [portfolio.holdings, eurUsdRate]);
+  }, [portfolio.holdings, convertToUSD]);
   const totalPortfolioMarketValue = useMemo(() => {
     let total = 0;
     for (const holding of portfolio.holdings) {
@@ -77,7 +80,7 @@ export default function Home() {
       total += amount;
     }
     return total;
-  }, [portfolio.holdings, eurUsdRate]);
+  }, [portfolio.holdings, convertToUSD]);
   const totalPortfolioUnrealizedPL = totalPortfolioMarketCost !== null && totalPortfolioMarketValue !== null
     ? totalPortfolioMarketValue - totalPortfolioMarketCost
     : null;
@@ -91,7 +94,7 @@ export default function Home() {
       total += amount;
     }
     return total;
-  }, [manualRealizedPL, portfolio.holdings, transactions, eurUsdRate]);
+  }, [manualRealizedPL, portfolio.holdings, transactions, convertToUSD]);
   const quoteTickers = useMemo(
     () => [...new Set([...transactions.map((transaction) => transaction.ticker), EUR_USD_TICKER])],
     [transactions]
@@ -107,9 +110,25 @@ export default function Home() {
         return { ...h, weight: totalPortfolioMarketCost && costInUSD !== null ? (costInUSD / totalPortfolioMarketCost) * 100 : 0 };
       })
       .sort((a, b) => b.weight - a.weight),
-    [portfolio.holdings, totalPortfolioMarketCost, eurUsdRate]
+    [portfolio.holdings, totalPortfolioMarketCost, convertToUSD]
   );
-  const cashBalance = transactions.reduce((cash,t)=>cash+(t.type==='BUY'?-1:1)*(t.quantity*t.price+(t.type==='BUY'?t.fees:-t.fees)),0);
+  const sectorTickers = useMemo(
+    () => portfolio.holdings.map((holding) => holding.ticker).sort().join(','),
+    [portfolio.holdings]
+  );
+  const sectorAllocation = useMemo(() => {
+    const totals = new Map<string, number>();
+    for (const holding of portfolio.holdings) {
+      const marketValue = convertToUSD(holding.marketValue, holding.currency);
+      if (marketValue === null) return [];
+      const sector = sectors[holding.ticker] || 'Unclassified';
+      totals.set(sector, (totals.get(sector) ?? 0) + marketValue);
+    }
+    return [...totals.entries()]
+      .map(([name, value]) => ({ name, value }))
+      .filter((sector) => sector.value > 0)
+      .sort((a, b) => b.value - a.value);
+  }, [portfolio.holdings, sectors, convertToUSD]);
   const totalDeposits = useMemo(
     () => deposits.reduce((sum, deposit) => sum + deposit.value, 0),
     [deposits]
@@ -250,6 +269,52 @@ export default function Home() {
       document.removeEventListener('visibilitychange', refreshOnVisibilityChange);
     };
   }, [quoteTickers]);
+
+  useEffect(() => {
+    const tickers = sectorTickers ? sectorTickers.split(',') : [];
+    let active = true;
+
+    if (tickers.length === 0) {
+      setSectors({});
+      setSectorErrors([]);
+      setIsLoadingSectors(false);
+      return () => {
+        active = false;
+      };
+    }
+
+    setIsLoadingSectors(true);
+    setSectorErrors([]);
+    Promise.all(tickers.map(async (ticker) => {
+      try {
+        const response = await fetch(`/api/sector?ticker=${encodeURIComponent(ticker)}`, { cache: 'no-store' });
+        const data = await response.json() as { sector?: string | null; error?: string };
+        if (!response.ok) {
+          return { ticker, sector: null, error: data.error ?? `Request failed (${response.status}).` };
+        }
+        return {
+          ticker,
+          sector: typeof data.sector === 'string' && data.sector ? data.sector : null,
+          error: null,
+        };
+      } catch (error) {
+        return {
+          ticker,
+          sector: null,
+          error: error instanceof Error ? error.message : 'Unable to fetch sector data.',
+        };
+      }
+    })).then((results) => {
+      if (!active) return;
+      setSectors(Object.fromEntries(results.map((result) => [result.ticker, result.sector] as const)));
+      setSectorErrors(results.filter((result) => result.error).map((result) => result.ticker));
+      setIsLoadingSectors(false);
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [sectorTickers]);
 
   useEffect(() => {
     if (
@@ -478,7 +543,26 @@ const removePosition = (ticker: string) => {
             {range}
           </button>
         ))}</div></div><div className="chart-legend"><span><i className="legend-dot" style={{background:'var(--blue)'}}/>Portfolio gain %</span><span><i className="legend-dot" style={{background:'#7d8aa8'}}/>S&amp;P 500 gain %</span></div><div className="chart-wrap"><ResponsiveContainer width="100%" height="100%"><AreaChart data={visiblePerformanceSeries} margin={{top:18,right:4,left:-18,bottom:0}}><defs><linearGradient id="valueGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#8da9ff" stopOpacity={0.26}/><stop offset="100%" stopColor="#8da9ff" stopOpacity={0}/></linearGradient><linearGradient id="benchmarkGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#7d8aa8" stopOpacity={0.18}/><stop offset="100%" stopColor="#7d8aa8" stopOpacity={0}/></linearGradient></defs><CartesianGrid stroke="#252a35" strokeDasharray="3 5" vertical={false}/><XAxis dataKey="date" ticks={performanceMonthTicks} tick={{fill:'#788397',fontSize:10}} axisLine={false} tickLine={false} interval={0} tickFormatter={(value:string)=>new Date(`${value}T00:00:00`).toLocaleDateString('en-US',{month:'short'})}/><YAxis tick={{fill:'#788397',fontSize:10}} axisLine={false} tickLine={false} tickFormatter={v=>`${v >= 0 ? '+' : ''}${Number(v).toFixed(0)}%`}/><Tooltip contentStyle={{background:'#171b25',border:'1px solid #303746',borderRadius:9,fontSize:12}} labelFormatter={(label)=>new Date(`${label}T00:00:00`).toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'})} formatter={(value, name) => [`${Number(value).toFixed(2)}%`, name === 'portfolio' ? 'Portfolio gain %' : 'S&P 500 gain %']} /><Area type="monotone" dataKey="portfolio" stroke="#8da9ff" strokeWidth={2} fill="url(#valueGradient)"/><Area type="monotone" dataKey="benchmark" stroke="#7d8aa8" strokeWidth={2} fill="url(#benchmarkGradient)" strokeDasharray="5 5"/></AreaChart></ResponsiveContainer></div></div>
-        <div className="panel"><div className="panel-heading"><div><h2 className="panel-title">Asset allocation</h2><div className="panel-subtitle">By current displayed market cost</div></div><span className="pill">{allocation.length} assets</span></div><div className="allocation-list">{allocation.length?allocation.map((h,i)=><div key={h.ticker}><div className="allocation-head"><div className="allocation-name"><span className="allocation-color" style={{background:colors[i%colors.length]}}/><span>{h.ticker}</span></div><div style={{display:'flex',alignItems:'center',gap:8}}><span style={{fontWeight:700}}>{h.weight.toFixed(1)}%</span><button className="button-secondary" onClick={()=>openEditPosition(h.ticker)} style={{padding:'5px 8px',fontSize:10,lineHeight:1.2}} type="button">Edit</button><button className="button-secondary" onClick={()=>removePosition(h.ticker)} style={{padding:'5px 8px',fontSize:10,lineHeight:1.2}} type="button">Remove</button></div></div><div className="track"><div className="track-fill" style={{width:`${h.weight}%`,background:colors[i%colors.length]}}/></div></div>):<div className="empty">Add a transaction to see allocation.</div>}</div><div style={{borderTop:'1px solid var(--border)',marginTop:20,paddingTop:16,display:'flex',justifyContent:'space-between',fontSize:11}}><span style={{color:'var(--muted)'}}>Number of positions</span><span>{allocation.length}</span></div></div>
+        <div className="panel"><div className="panel-heading"><div><h2 className="panel-title">Asset allocation</h2><div className="panel-subtitle">Sector exposure by current market value</div></div><span className="pill">{allocation.length} assets</span></div>
+          {allocation.length > 0 && <div className="sector-allocation">
+            {totalPortfolioMarketValue === null
+              ? <div className="empty">Sector allocation is unavailable until the currency conversion rate loads.</div>
+              : sectorAllocation.length > 0
+                ? <div className="sector-chart-layout">
+                  <div className="sector-chart" role="img" aria-label={`Sector allocation: ${sectorAllocation.map((sector) => `${sector.name} ${((sector.value / sectorAllocation.reduce((sum, item) => sum + item.value, 0)) * 100).toFixed(1)}%`).join(', ')}`}>
+                    <ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={sectorAllocation} dataKey="value" nameKey="name" innerRadius="62%" outerRadius="88%" paddingAngle={3} stroke="none">{sectorAllocation.map((sector, index) => <Cell key={sector.name} fill={colors[index % colors.length]} />)}</Pie><Tooltip contentStyle={{background:'#171b25',border:'1px solid #303746',borderRadius:9,fontSize:12}} formatter={(value, name) => [`${((Number(value) / sectorAllocation.reduce((sum, item) => sum + item.value, 0)) * 100).toFixed(1)}%`, name]} /></PieChart></ResponsiveContainer>
+                  </div>
+                  <div className="sector-legend">{sectorAllocation.map((sector, index) => {
+                    const total = sectorAllocation.reduce((sum, item) => sum + item.value, 0);
+                    return <div className="sector-legend-item" key={sector.name}><span className="allocation-color" style={{background:colors[index % colors.length]}}/><span className="sector-name">{sector.name}</span><strong>{((sector.value / total) * 100).toFixed(1)}%</strong></div>;
+                  })}</div>
+                </div>
+                : <div className="empty">No sector market values are available.</div>}
+            {sectorErrors.length > 0 && <div className="sector-status" role="status">Yahoo Finance sector data unavailable for {sectorErrors.join(', ')}; those holdings are shown as Unclassified.</div>}
+            {isLoadingSectors && <div className="sector-status" role="status">Loading sector classifications from Yahoo Finance…</div>}
+          </div>}
+          {allocation.length > 0 && <h3 className="allocation-section-title">Position weights · market cost</h3>}
+          <div className="allocation-list">{allocation.length?allocation.map((h,i)=><div key={h.ticker}><div className="allocation-head"><div className="allocation-name"><span className="allocation-color" style={{background:colors[i%colors.length]}}/><span>{h.ticker}</span></div><div style={{display:'flex',alignItems:'center',gap:8}}><span style={{fontWeight:700}}>{h.weight.toFixed(1)}%</span><button className="button-secondary" onClick={()=>openEditPosition(h.ticker)} style={{padding:'5px 8px',fontSize:10,lineHeight:1.2}} type="button">Edit</button><button className="button-secondary" onClick={()=>removePosition(h.ticker)} style={{padding:'5px 8px',fontSize:10,lineHeight:1.2}} type="button">Remove</button></div></div><div className="track"><div className="track-fill" style={{width:`${h.weight}%`,background:colors[i%colors.length]}}/></div></div>):<div className="empty">Add a transaction to see allocation.</div>}</div><div style={{borderTop:'1px solid var(--border)',marginTop:20,paddingTop:16,display:'flex',justifyContent:'space-between',fontSize:11}}><span style={{color:'var(--muted)'}}>Number of positions</span><span>{allocation.length}</span></div></div>
       </section>
       <section className="panel table-panel"><div className="table-head"><div><h2 className="panel-title">Your holdings</h2><div className="panel-subtitle">Yahoo Finance quotes refresh every minute while this page is open</div></div><div style={{display:'flex',gap:8}}><select className="button-secondary" value={filter} onChange={e=>setFilter(e.target.value)} aria-label="Filter holdings"><option>All assets</option><option>Profitable</option><option>At a loss</option></select><button className="button-secondary" onClick={()=>{ setShowTransactions(v=>!v); setShowDeposits(false); }}>{showTransactions?'Hide history':'Transaction history'} ↗</button><button className="button-secondary" onClick={()=>{ setShowDeposits(v=>!v); setShowTransactions(false); }}>{showDeposits?'Hide deposits':'Deposits'} ↗</button></div></div><div className="table-scroll"><table><thead><tr><th>Asset</th><th>Shares</th><th>Avg. cost</th><th>Last price*</th><th>Investment cost</th><th>Market value</th><th>Unrealized P/L</th><th>Return</th><th>Realized P/L</th><th>Action</th></tr></thead><tbody>{allocation.filter(h=>filter==='All assets'||(filter==='Profitable'?h.unrealizedPL>=0:h.unrealizedPL<0)).map(h=><tr key={h.ticker}><td><div className="ticker-cell"><div className="stock-logo">{h.ticker.slice(0,2)}</div><div><div style={{display:'flex',alignItems:'center',gap:7}}><div className="ticker">{h.ticker}</div><a className="button-secondary" href={`https://finance.yahoo.com/quote/${encodeURIComponent(h.ticker)}/`} target="_blank" rel="noopener noreferrer" style={{padding:'3px 6px',fontSize:9,lineHeight:1.2}}>View on Yahoo</a></div><div className="company">{h.company}</div></div></div></td><td>{h.quantity.toLocaleString('en-US',{maximumFractionDigits:6})}</td><td>{money(h.averageCost,h.currency)}</td><td title={quotes[h.ticker]?.updatedAt ? `Yahoo Finance update: ${new Date(quotes[h.ticker]?.updatedAt ?? '').toLocaleString()}` : undefined} style={{fontWeight:600}}>{h.quoteSource==='live'?money(h.marketPrice,h.currency):'Unavailable'}</td><td>{money(h.quantity * h.averageCost, h.currency)}</td><td style={{fontWeight:700}}>{money(h.marketValue,h.currency)}</td><td className={h.unrealizedPL>=0?'positive':'negative'}>{signedMoney(h.unrealizedPL,h.currency)}</td><td><span className={h.unrealizedPL>=0?'tag':'tag'} style={h.unrealizedPL<0?{background:'#3a252c',color:'var(--red)'}:{}}>{h.unrealizedPLPercent>=0?'+':''}{h.unrealizedPLPercent.toFixed(2)}%</span></td><td><input aria-label={`Realized P/L for ${h.ticker}`} type="text" inputMode="decimal" value={money(manualRealizedPL[h.ticker] ?? 0, h.currency)} onChange={e=>{ const raw = e.target.value.replace(/[^\d.-]/g,''); const numericValue = raw === '' ? 0 : Number(raw); setManualRealizedPL((prev)=>({ ...prev, [h.ticker]: Number.isFinite(numericValue) ? numericValue : 0 })); }} style={{width:90,background:'transparent',border:'1px solid #303746',borderRadius:6,color:(manualRealizedPL[h.ticker] ?? 0) >= 0 ? '#69d7a2' : '#ff7e86',padding:'6px 8px',fontSize:12,textAlign:'right',fontWeight:600,outline:'none'}} /></td><td><div style={{display:'flex',gap:6,justifyContent:'flex-start'}}><button className="button-secondary" onClick={()=>openEditPosition(h.ticker)} style={{padding:'6px 8px',fontSize:10,lineHeight:1.2}} type="button">Edit</button><button className="button-secondary" onClick={()=>removePosition(h.ticker)} style={{padding:'6px 8px',fontSize:10,lineHeight:1.2}} type="button">Remove</button></div></td></tr>)}{!allocation.length&&<tr><td colSpan={8} className="empty">No holdings yet. Add a buy transaction to get started.</td></tr>}</tbody></table></div><div style={{padding:'12px 20px',fontSize:10,color:'var(--muted)'}}>* Prices come from Yahoo Finance when available. If unavailable, the dashboard uses transaction cost for calculations and displays “Unavailable” here. Values across different currencies are not converted into one base currency.</div></section>
     

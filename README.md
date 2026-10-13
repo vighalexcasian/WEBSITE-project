@@ -22,7 +22,7 @@ Then open http://localhost:3000.
 - Allocation chart and holdings filters
 
 ## Important prototype limitations
-- Transactions are held in browser memory and reset when the page reloads.
+- Transactions, transaction history, and last-known Yahoo Finance quotes are saved in this browser's local storage; they are not synced across browsers or devices.
 - Sample data is fictional and prices are not live.
 - Different currencies are not yet converted into a base currency; totals currently sum displayed numeric values and should only be interpreted with single-currency sample data.
 - Performance chart is illustrative and is not computed from transactions.

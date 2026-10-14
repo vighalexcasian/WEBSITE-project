@@ -212,9 +212,10 @@ export default function Home() {
     [deposits]
   );
   const totalReturnPercent = useMemo(() => {
-    if (!totalPortfolioMarketCost || totalPortfolioUnrealizedPL === null || totalManualRealizedPL === null) return null;
-    return ((totalPortfolioUnrealizedPL + totalManualRealizedPL) / totalPortfolioMarketCost) * 100;
-  }, [totalPortfolioUnrealizedPL, totalManualRealizedPL, totalPortfolioMarketCost]);
+    if (totalDeposits <= 0 || totalPortfolioUnrealizedPL === null || totalManualRealizedPL === null) return null;
+    const portfolioValueAfterProfits = totalDeposits + totalPortfolioUnrealizedPL + totalManualRealizedPL;
+    return ((portfolioValueAfterProfits - totalDeposits) / totalDeposits) * 100;
+  }, [totalDeposits, totalPortfolioUnrealizedPL, totalManualRealizedPL]);
   const cashBalanceCheckFormula = totalPortfolioMarketCost !== null && totalManualRealizedPL !== null
     ? totalDeposits - totalPortfolioMarketCost + totalManualRealizedPL
     : null;
@@ -642,8 +643,8 @@ const removePosition = (ticker: string) => {
       <header className="topbar"><div><div className="eyebrow">INVESTMENT WORKSPACE / OVERVIEW</div><h1 className="page-title">Portfolio overview</h1></div><div className="top-actions"><span className="pill">◷ &nbsp; {new Date().toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'})}</span><button className="button-secondary" type="button" onClick={()=>void refreshQuotes(quoteTickers)} disabled={isRefreshingQuotes}>{isRefreshingQuotes?'Refreshing…':'Refresh prices'}</button><button className="button-primary" onClick={openAddTransaction}>＋ Add transaction</button><div className="avatar">A</div></div></header>
       <div style={{fontSize:11,color:'var(--muted)',marginBottom:15,display:'flex',alignItems:'center',gap:8}}><span style={{width:7,height:7,background:'#e5b765',borderRadius:'50%',display:'inline-block'}}/> {notice}</div>
       <section className="metrics grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        <Metric label="Deposited cash" value={money(totalDeposits)} note="" icon="▣" />
-        <Metric label="Portfolio market cost" value={totalPortfolioMarketCost === null ? 'FX rate unavailable' : money(totalPortfolioMarketCost)} note={totalReturnPercent === null ? 'Return unavailable' : `${totalReturnPercent >= 0 ? '+' : ''}${totalReturnPercent.toFixed(2)}% total return`} icon="▢" noteTone={totalReturnPercent !== null && totalReturnPercent >= 0?'positive':'negative'} />
+        <Metric label="Deposited cash" value={money(totalDeposits)} note={totalReturnPercent === null ? 'Return unavailable' : `${totalReturnPercent >= 0 ? '+' : ''}${totalReturnPercent.toFixed(2)}% total return`} icon="▣" noteTone={totalReturnPercent !== null && totalReturnPercent >= 0?'positive':'negative'} />
+        <Metric label="Portfolio market cost" value={totalPortfolioMarketCost === null ? 'FX rate unavailable' : money(totalPortfolioMarketCost)} note="" icon="▢" />
         <Metric label="Portfolio market value" value={totalPortfolioMarketValue === null ? 'FX rate unavailable' : money(totalPortfolioMarketValue)} note="" icon="◈" />
         <Metric label="Unrealized profit / loss" value={totalPortfolioUnrealizedPL === null ? 'FX rate unavailable' : signedMoney(totalPortfolioUnrealizedPL)} note="" icon="↗" tone={totalPortfolioUnrealizedPL !== null && totalPortfolioUnrealizedPL>=0?'positive':'negative'} />
         <Metric label="Realized profit / loss" value={totalManualRealizedPL === null ? 'FX rate unavailable' : signedMoney(totalManualRealizedPL)} note="" icon="⇄" tone={totalManualRealizedPL !== null && totalManualRealizedPL>=0?'positive':'negative'} />

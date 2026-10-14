@@ -624,16 +624,16 @@ const removePosition = (ticker: string) => {
   }
 };
 
-  return <div className="app-shell">
+  return <div className="app-shell grid grid-cols-1 lg:grid-cols-[230px_minmax(0,1fr)]">
     <aside className="sidebar">
       <div className="brand"><span>investment tracker<span style={{color:'#8da9ff'}}>.</span></span></div>
-      <div><div className="nav-label">WORKSPACE</div><div className="nav-item active"><span className="nav-icon">▦</span>Portfolio overview</div><div className="nav-item" onClick={()=>setNotice('Stock screener is planned for the next development stage.')} role="button"><span className="nav-icon">⌕</span>Stock screener <span className="tag muted-tag" style={{marginLeft:'auto'}}>Soon</span></div><div className="nav-item" onClick={()=>setNotice('Valuation workspace is planned for a later stage.')} role="button"><span className="nav-icon">⌁</span>Valuation</div><div className="nav-item" onClick={()=>setNotice('Risk analytics will be added after the portfolio ledger is complete.')} role="button"><span className="nav-icon">◉</span>Risk analytics</div></div>
+      <div><div className="nav-label">WORKSPACE</div><div className="nav-item active"><span className="nav-icon">▦</span>Portfolio overview</div><div className="nav-item" onClick={()=>setNotice('Stock screener is planned for the next development stage.')} role="button"><span className="nav-icon">⌕</span>Stock screener <span className="tag muted-tag" style={{marginLeft:'auto'}}>Soon</span></div><div className="nav-item" onClick={()=>setNotice('Risk analytics will be added after the portfolio ledger is complete.')} role="button"><span className="nav-icon">◉</span>Risk analytics</div></div>
       <div><div className="nav-label">PREFERENCES</div><div className="nav-item" onClick={()=>setNotice('Settings and account persistence will be configured in a later step.')} role="button"><span className="nav-icon">⚙</span>Settings</div></div>
     </aside>
-    <main className="main">
+    <main className="main min-w-0 p-4 md:p-8">
       <header className="topbar"><div><div className="eyebrow">INVESTMENT WORKSPACE / OVERVIEW</div><h1 className="page-title">Portfolio overview</h1></div><div className="top-actions"><span className="pill">◷ &nbsp; {new Date().toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'})}</span><button className="button-secondary" type="button" onClick={()=>void refreshQuotes(quoteTickers)} disabled={isRefreshingQuotes}>{isRefreshingQuotes?'Refreshing…':'Refresh prices'}</button><button className="button-primary" onClick={openAddTransaction}>＋ Add transaction</button><div className="avatar">A</div></div></header>
       <div style={{fontSize:11,color:'var(--muted)',marginBottom:15,display:'flex',alignItems:'center',gap:8}}><span style={{width:7,height:7,background:'#e5b765',borderRadius:'50%',display:'inline-block'}}/> {notice}</div>
-      <section className="metrics">
+      <section className="metrics grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         <Metric label="Deposited cash" value={money(totalDeposits)} note="" icon="▣" />
         <Metric label="Portfolio market cost" value={totalPortfolioMarketCost === null ? 'FX rate unavailable' : money(totalPortfolioMarketCost)} note={totalReturnPercent === null ? 'Return unavailable' : `${totalReturnPercent >= 0 ? '+' : ''}${totalReturnPercent.toFixed(2)}% total return`} icon="▢" noteTone={totalReturnPercent !== null && totalReturnPercent >= 0?'positive':'negative'} />
         <Metric label="Portfolio market value" value={totalPortfolioMarketValue === null ? 'FX rate unavailable' : money(totalPortfolioMarketValue)} note="" icon="◈" />
@@ -641,7 +641,7 @@ const removePosition = (ticker: string) => {
         <Metric label="Realized profit / loss" value={totalManualRealizedPL === null ? 'FX rate unavailable' : signedMoney(totalManualRealizedPL)} note="" icon="⇄" tone={totalManualRealizedPL !== null && totalManualRealizedPL>=0?'positive':'negative'} />
         <Metric label="Uninvested cash" value={<input aria-label="Uninvested cash" className="usd-input" type="text" inputMode="decimal" value={money(manualCash, 'USD')} onChange={e=>{ const cleaned = e.target.value.replace(/[^\d.-]/g, ''); const nextValue = Number(cleaned); setManualCash(Number.isFinite(nextValue) ? nextValue : 0); }} style={{width:'100%',minWidth:150,maxWidth:220,background:'transparent',border:'none',outline:'none',boxShadow:'none',color:'var(--text)',padding:0,fontSize:28,textAlign:'left',fontWeight:700,appearance:'none',WebkitAppearance:'none',MozAppearance:'textfield'}} />} note={totalPortfolioMarketCost === null ? 'FX rate unavailable' : `${uninvestedCashPercent.toFixed(2)}% of portfolio market cost`} />
       </section>
-      <section className="portfolio-checks" aria-label="Portfolio verification checks">
+      <section className="portfolio-checks grid grid-cols-1 md:grid-cols-2 gap-4" aria-label="Portfolio verification checks">
         <VerificationCheck
           title="Cash balance check"
           formula="Deposited cash − portfolio market cost + realized P/L"
@@ -659,7 +659,7 @@ const removePosition = (ticker: string) => {
           difference={portfolioCheckDifference}
         />
       </section>
-      <section className="content-grid">
+      <section className="content-grid grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className="panel"><div className="panel-heading"><div><h2 className="panel-title">Portfolio performance</h2><div className="panel-subtitle">Daily gains rebased to 0% at the last available observation on or before each range starts</div></div><div style={{display:'flex',gap:8}}>{['3M','6M','1Y'].map((range) => (
           <button
             key={range}

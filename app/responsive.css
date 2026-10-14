@@ -1,0 +1,218 @@
+.app-shell {
+  @apply grid grid-cols-1;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: clip;
+}
+
+.main {
+  @apply min-w-0 p-4;
+  width: 100%;
+  max-width: 100%;
+}
+
+.metrics {
+  @apply grid grid-cols-1 gap-4;
+}
+
+.portfolio-checks {
+  @apply grid grid-cols-1 gap-4;
+}
+
+.content-grid {
+  @apply grid grid-cols-1 gap-4;
+}
+
+.topbar {
+  @apply flex flex-col items-stretch justify-between gap-4;
+}
+
+.top-actions {
+  @apply flex flex-wrap items-center gap-2;
+}
+
+.page-title,
+.metric-value {
+  @apply text-xl;
+}
+
+.panel-heading,
+.table-head {
+  @apply flex flex-col items-stretch gap-3;
+}
+
+.table-scroll {
+  @apply w-full min-w-0 overflow-x-auto;
+}
+
+.chart-wrap,
+.sector-chart,
+.panel,
+.metric {
+  @apply w-full min-w-0;
+}
+
+.sector-chart-layout {
+  @apply grid grid-cols-1 gap-4;
+}
+
+.allocation-list {
+  @apply grid grid-cols-2 gap-3;
+}
+
+.allocation-list > div {
+  min-width: 0;
+}
+
+.allocation-head {
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.allocation-name {
+  min-width: 0;
+}
+
+.allocation-name > span:last-child {
+  min-width: 0;
+}
+
+.chart-legend {
+  @apply flex flex-wrap gap-3;
+}
+
+.table-head > div:last-child {
+  @apply flex flex-wrap items-center gap-2;
+}
+
+.sidebar {
+  @apply flex flex-row items-center gap-3 overflow-x-auto p-3;
+  border-right: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.sidebar > div {
+  @apply flex flex-shrink-0 items-center gap-1;
+  white-space: nowrap;
+}
+
+.sidebar .nav-label {
+  display: none;
+}
+
+.nav-item {
+  @apply flex-shrink-0;
+  white-space: nowrap;
+}
+
+.brand {
+  @apply flex-shrink-0;
+}
+
+.table-scroll table {
+  min-width: max-content;
+}
+
+@screen md {
+  .main {
+    @apply p-8;
+  }
+
+  .metrics,
+  .portfolio-checks {
+    @apply grid-cols-2;
+  }
+
+  .page-title,
+  .metric-value {
+    @apply text-3xl;
+  }
+
+  .topbar,
+  .panel-heading,
+  .table-head {
+    @apply flex-row items-center;
+  }
+
+  .sector-chart-layout {
+    @apply grid-cols-2;
+  }
+
+  .allocation-list {
+    @apply grid-cols-2;
+  }
+
+  .chart-wrap {
+    height: 210px;
+  }
+}
+
+@screen lg {
+  .app-shell {
+    grid-template-columns: 230px minmax(0, 1fr);
+  }
+
+  .metrics {
+    @apply grid-cols-3;
+  }
+
+  .content-grid {
+    @apply grid-cols-2;
+  }
+
+  .sidebar {
+    @apply flex-col items-stretch gap-7 p-6;
+    overflow: visible;
+    border-right: 1px solid var(--border);
+    border-bottom: 0;
+  }
+
+  .sidebar > div {
+    display: block;
+  }
+
+  .sidebar .nav-label {
+    display: block;
+  }
+}
+
+@media (max-width: 700px) {
+  html,
+  body {
+    max-width: 100%;
+    overflow-x: clip;
+  }
+
+  .chart-wrap {
+    height: 190px;
+  }
+
+  .top-actions .pill {
+    display: none;
+  }
+
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .field.full {
+    grid-column: auto;
+  }
+
+  .table-head > div:last-child {
+    width: 100%;
+  }
+
+  .table-head > div:last-child > * {
+    flex: 1 1 auto;
+  }
+
+  .allocation-head > div:last-child {
+    flex-wrap: wrap;
+    gap: 4px !important;
+  }
+
+  .allocation-head > div:last-child button {
+    padding: 4px 5px !important;
+  }
+}

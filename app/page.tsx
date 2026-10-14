@@ -13,6 +13,7 @@ const initialTransactions: Transaction[] = [
 const colors = ['#8da9ff','#69d7a2','#d6a6ff','#ffc878','#ff8f9a','#80d9e9'];
 const EUR_USD_TICKER = 'EURUSD=X';
 const money = (n:number,currency='USD') => new Intl.NumberFormat('en-US',{style:'currency',currency,maximumFractionDigits:2}).format(n);
+const exchangeRateMoney = (rate:number) => new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',minimumFractionDigits:4,maximumFractionDigits:4}).format(rate);
 const signedMoney = (n:number,currency='USD') => `${n>0?'+':''}${money(n,currency)}`;
 const dateKey = (date: string | Date) => (date instanceof Date ? date.toISOString() : date).slice(0, 10);
 
@@ -24,6 +25,15 @@ type PortfolioSnapshot = {
   realizedPL: number;
   totalPL: number;
   uninvestedCash: number;
+};
+
+type QuoteApiResult = {
+  ticker?: string;
+  price?: number;
+  currency?: string;
+  updatedAt?: string;
+  stale?: boolean;
+  error?: string;
 };
 
 const isTransactionArray = (value: unknown): value is Transaction[] =>
@@ -59,6 +69,8 @@ export default function Home() {
   const [sectorErrors,setSectorErrors] = useState<string[]>([]);
   const [isLoadingSectors,setIsLoadingSectors] = useState(false);
   const [eurUsdRate,setEurUsdRate] = useState<number | null>(null);
+  const [eurUsdRateUpdatedAt,setEurUsdRateUpdatedAt] = useState<string | undefined>();
+  const [eurUsdQuoteError,setEurUsdQuoteError] = useState<string | null>(null);
   const [isRefreshingQuotes,setIsRefreshingQuotes] = useState(false);
   const [tickerQuoteLookup,setTickerQuoteLookup] = useState<{
     ticker: string;
@@ -282,18 +294,15 @@ export default function Home() {
     setTickerQuoteLookup({ ticker: normalizedTicker, status: 'loading' });
     try {
       const response = await fetch(`/api/quote?ticker=${encodeURIComponent(normalizedTicker)}`, { cache: 'no-store' });
-      const data = await response.json() as {
-        price?: number;
-        currency?: string;
-        updatedAt?: string;
-        stale?: boolean;
-        error?: string;
-      };
+      const data = await response.json() as QuoteApiResult;
       if (!response.ok) {
         throw new Error(data.error ?? `Quote request failed (${response.status}).`);
       }
+      if (data.ticker !== normalizedTicker) {
+        throw new Error('The quote response did not match the requested ticker.');
+      }
       if (typeof data.price !== 'number' || !Number.isFinite(data.price)) {
-        throw new Error(data.error ?? 'Yahoo Finance did not return a valid price for this ticker.');
+        throw new Error(data.error ?? 'The quote service did not return a valid price for this ticker.');
       }
 
       const quote: Quote = {
@@ -307,13 +316,13 @@ export default function Home() {
         ticker: normalizedTicker,
         status: 'loaded',
         quote,
-        error: data.stale ? 'Showing a cached Yahoo Finance quote; it may be delayed.' : undefined,
+        error: data.stale ? 'Showing a cached quote; it may be delayed.' : undefined,
       });
     } catch (error) {
       setTickerQuoteLookup({
         ticker: normalizedTicker,
         status: 'error',
-        error: error instanceof Error ? error.message : 'Unable to retrieve a Yahoo Finance quote.',
+        error: error instanceof Error ? error.message : 'Unable to retrieve this quote.',
       });
     }
   };
@@ -326,7 +335,7 @@ export default function Home() {
     try {
       const response = await fetch(`/api/quote?tickers=${encodeURIComponent(uniqueTickers.join(','))}`, { cache: 'no-store' });
       const data = await response.json() as {
-        quotes?: Array<{ ticker: string; price?: number; currency?: string; updatedAt?: string; stale?: boolean; error?: string }>;
+        quotes?: QuoteApiResult[];
         error?: string;
       };
       if (!response.ok) {
@@ -354,11 +363,16 @@ export default function Home() {
       });
 
       const fxQuote = fetched.find((result) => result.ticker === EUR_USD_TICKER)?.quote;
+      const fxResult = fetched.find((result) => result.ticker === EUR_USD_TICKER);
       const nextQuotes = Object.fromEntries(fetched.flatMap((result) => result.quote && result.ticker !== EUR_USD_TICKER ? [[result.ticker, result.quote] as const] : []));
       const failedQuotes = fetched.filter((result) => result.error);
       const staleQuotes = fetched.filter((result) => result.stale);
       if (fxQuote) {
         setEurUsdRate(fxQuote.price);
+        setEurUsdRateUpdatedAt(fxQuote.updatedAt);
+        setEurUsdQuoteError(null);
+      } else if (fxResult?.error) {
+        setEurUsdQuoteError(fxResult.error);
       }
       if (Object.keys(nextQuotes).length) {
         setQuotes((prev) => ({ ...prev, ...nextQuotes }));
@@ -371,7 +385,11 @@ export default function Home() {
           : `Quote data refreshed for ${uniqueTickers.length} symbol${uniqueTickers.length === 1 ? '' : 's'}.`
       );
     } catch (error) {
-      setNotice(error instanceof Error ? `Unable to refresh quotes: ${error.message}` : 'Unable to refresh quotes.');
+      const errorMessage = error instanceof Error ? error.message : 'Unable to refresh quotes.';
+      if (uniqueTickers.includes(EUR_USD_TICKER)) {
+        setEurUsdQuoteError(errorMessage);
+      }
+      setNotice(`Unable to refresh quotes: ${errorMessage}`);
     } finally {
       setIsRefreshingQuotes(false);
     }
@@ -696,7 +714,44 @@ const removePosition = (ticker: string) => {
             {isLoadingSectors && <div className="sector-status" role="status">Loading sector classifications from Yahoo Finance…</div>}
           </div>}
           {allocation.length > 0 && <h3 className="allocation-section-title">Position weights · market cost</h3>}
-          <div className="allocation-list">{allocation.length?allocation.map((h,i)=><div key={h.ticker}><div className="allocation-head"><div className="allocation-name"><span className="allocation-color" style={{background:colors[i%colors.length]}}/><span>{h.ticker}<small className="sector-label">{sectors[h.ticker] ?? (isLoadingSectors ? 'Loading sector…' : 'Sector unavailable')}</small></span></div><div style={{display:'flex',alignItems:'center',gap:8}}><span style={{fontWeight:700}}>{h.weight.toFixed(1)}%</span><button className="button-secondary" onClick={()=>openEditPosition(h.ticker)} style={{padding:'5px 8px',fontSize:10,lineHeight:1.2}} type="button">Edit</button><button className="button-secondary" onClick={()=>removePosition(h.ticker)} style={{padding:'5px 8px',fontSize:10,lineHeight:1.2}} type="button">Remove</button></div></div><div className="track"><div className="track-fill" style={{width:`${h.weight}%`,background:colors[i%colors.length]}}/></div></div>):<div className="empty">Add a transaction to see allocation.</div>}</div><div style={{borderTop:'1px solid var(--border)',marginTop:20,paddingTop:16,display:'flex',justifyContent:'space-between',fontSize:11}}><span style={{color:'var(--muted)'}}>Number of positions</span><span>{allocation.length}</span></div></div>
+          <div className="allocation-list">
+            {allocation.length
+              ? allocation.map((holding, index) => (
+                <div key={holding.ticker}>
+                  <div className="allocation-head">
+                    <div className="allocation-name">
+                      <span className="allocation-color" style={{background:colors[index % colors.length]}} />
+                      <span>{holding.ticker}<small className="sector-label">{sectors[holding.ticker] ?? (isLoadingSectors ? 'Loading sector…' : 'Sector unavailable')}</small></span>
+                    </div>
+                    <div className="allocation-actions" style={{display:'flex',alignItems:'center',gap:8}}>
+                      <span style={{fontWeight:700}}>{holding.weight.toFixed(1)}%</span>
+                      <button className="button-secondary" onClick={() => openEditPosition(holding.ticker)} style={{padding:'5px 8px',fontSize:10,lineHeight:1.2}} type="button">Edit</button>
+                      <button className="button-secondary" onClick={() => removePosition(holding.ticker)} style={{padding:'5px 8px',fontSize:10,lineHeight:1.2}} type="button">Remove</button>
+                    </div>
+                  </div>
+                  <div className="track"><div className="track-fill" style={{width:`${holding.weight}%`,background:colors[index % colors.length]}} /></div>
+                </div>
+              ))
+              : <div className="empty">Add a transaction to see allocation.</div>}
+            <div className="exchange-rate-card" role="status" aria-label="EUR/USD exchange rate">
+              <div>
+                <strong>EUR / USD</strong>
+                <small>Frankfurter reference rate</small>
+              </div>
+              <strong>
+                {eurUsdRate !== null
+                  ? `€1 = ${exchangeRateMoney(eurUsdRate)}`
+                  : eurUsdQuoteError
+                    ? 'Unavailable'
+                    : 'Loading…'}
+              </strong>
+              {eurUsdRateUpdatedAt && <small>As of {new Date(eurUsdRateUpdatedAt).toLocaleDateString('en-GB')}</small>}
+              {eurUsdQuoteError && <small className="exchange-rate-error">
+                {eurUsdRate !== null ? 'Update unavailable; showing the last available rate.' : eurUsdQuoteError}
+              </small>}
+            </div>
+          </div>
+          <div style={{borderTop:'1px solid var(--border)',marginTop:20,paddingTop:16,display:'flex',justifyContent:'space-between',fontSize:11}}><span style={{color:'var(--muted)'}}>Number of positions</span><span>{allocation.length}</span></div></div>
       </section>
       <section className="panel table-panel"><div className="table-head"><div><h2 className="panel-title">Your holdings</h2><div className="panel-subtitle">Quote checks run every minute; Yahoo Finance results are cached for 10 minutes</div></div><div style={{display:'flex',gap:8}}><select className="button-secondary" value={filter} onChange={e=>setFilter(e.target.value)} aria-label="Filter holdings"><option>All assets</option><option>Profitable</option><option>At a loss</option></select><button className="button-secondary" onClick={()=>{ setShowTransactions(v=>!v); setShowDeposits(false); }}>{showTransactions?'Hide history':'Transaction history'} ↗</button><button className="button-secondary" onClick={()=>{ setShowDeposits(v=>!v); setShowTransactions(false); }}>{showDeposits?'Hide deposits':'Deposits'} ↗</button></div></div><div className="table-scroll"><table><thead><tr><th>Asset</th><th>Shares</th><th>Avg. cost</th><th>Last price*</th><th>Investment cost</th><th>Market value</th><th>Unrealized P/L</th><th>Return</th><th>Realized P/L</th><th>Action</th></tr></thead><tbody>{allocation.filter(h=>filter==='All assets'||(filter==='Profitable'?h.unrealizedPL>=0:h.unrealizedPL<0)).map(h=><tr key={h.ticker}><td><div className="ticker-cell"><div className="stock-logo">{h.ticker.slice(0,2)}</div><div><div style={{display:'flex',alignItems:'center',gap:7}}><div className="ticker">{h.ticker}</div><a className="button-secondary" href={`https://finance.yahoo.com/quote/${encodeURIComponent(h.ticker)}/`} target="_blank" rel="noopener noreferrer" style={{padding:'3px 6px',fontSize:9,lineHeight:1.2}}>View on Yahoo</a></div><div className="company">{h.company}</div><small className="sector-label">{sectors[h.ticker] ?? (isLoadingSectors ? 'Loading sector…' : 'Sector unavailable')}</small></div></div></td><td>{h.quantity.toLocaleString('en-US',{maximumFractionDigits:6})}</td><td>{money(h.averageCost,h.currency)}</td><td title={quotes[h.ticker]?.updatedAt ? `Yahoo Finance update: ${new Date(quotes[h.ticker]?.updatedAt ?? '').toLocaleString()}` : 'Yahoo Finance quote unavailable; using transaction cost as a fallback.'} style={{fontWeight:600}}><div>{money(h.marketPrice,h.currency)}</div>{h.quoteSource !== 'live' && <small className="quote-fallback-label">{isRefreshingQuotes || !portfolioDataLoaded ? 'Loading live quote…' : 'Transaction-price fallback'}</small>}</td><td>{money(h.quantity * h.averageCost, h.currency)}</td><td style={{fontWeight:700}}>{money(h.marketValue,h.currency)}</td><td className={h.unrealizedPL>=0?'positive':'negative'}>{signedMoney(h.unrealizedPL,h.currency)}</td><td><span className={h.unrealizedPL>=0?'tag':'tag'} style={h.unrealizedPL<0?{background:'#3a252c',color:'var(--red)'}:{}}>{h.unrealizedPLPercent>=0?'+':''}{h.unrealizedPLPercent.toFixed(2)}%</span></td><td><input aria-label={`Realized P/L for ${h.ticker}`} type="text" inputMode="decimal" value={money(manualRealizedPL[h.ticker] ?? 0, h.currency)} onChange={e=>{ const raw = e.target.value.replace(/[^\d.-]/g,''); const numericValue = raw === '' ? 0 : Number(raw); setManualRealizedPL((prev)=>({ ...prev, [h.ticker]: Number.isFinite(numericValue) ? numericValue : 0 })); }} style={{width:90,background:'transparent',border:'1px solid #303746',borderRadius:6,color:(manualRealizedPL[h.ticker] ?? 0) >= 0 ? '#69d7a2' : '#ff7e86',padding:'6px 8px',fontSize:12,textAlign:'right',fontWeight:600,outline:'none'}} /></td><td><div style={{display:'flex',gap:6,justifyContent:'flex-start'}}><button className="button-secondary" onClick={()=>openEditPosition(h.ticker)} style={{padding:'6px 8px',fontSize:10,lineHeight:1.2}} type="button">Edit</button><button className="button-secondary" onClick={()=>removePosition(h.ticker)} style={{padding:'6px 8px',fontSize:10,lineHeight:1.2}} type="button">Remove</button></div></td></tr>)}{!allocation.length&&<tr><td colSpan={8} className="empty">No holdings yet. Add a buy transaction to get started.</td></tr>}</tbody></table></div><div style={{padding:'12px 20px',fontSize:10,color:'var(--muted)'}}>* Prices come from Yahoo Finance when available; before a live quote is available, the entered transaction price is shown as a fallback. Values across different currencies are not converted into one base currency.</div></section>
     

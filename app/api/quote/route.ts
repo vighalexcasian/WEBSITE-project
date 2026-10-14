@@ -7,6 +7,11 @@ type FinnhubQuote = {
   t?: unknown;
 };
 
+type FrankfurterQuote = {
+  date?: unknown;
+  rates?: Record<string, unknown>;
+};
+
 type QuoteResult = {
   ticker: string;
   price?: number;
@@ -17,13 +22,47 @@ type QuoteResult = {
 };
 
 async function getQuote(ticker: string): Promise<QuoteResult> {
+  const normalizedTicker = ticker.toUpperCase();
+
+  // 1. Seamlessly handle EUR/USD via Frankfurter API (Free, no key needed)
+  if (normalizedTicker === 'EURUSD=X' || normalizedTicker === 'EUR/USD') {
+    try {
+      const fxRes = await fetch('https://api.frankfurter.dev/v1/latest?base=EUR&symbols=USD', {
+        next: { revalidate: QUOTE_CACHE_SECONDS },
+      });
+      if (!fxRes.ok) {
+        console.error(`Frankfurter quote request failed for EUR/USD with status ${fxRes.status}.`);
+        return { ticker, error: 'Unable to fetch the EUR/USD rate from Frankfurter. Please try again later.' };
+      }
+
+      const fxData = await fxRes.json() as FrankfurterQuote;
+      const price = fxData.rates?.USD;
+      if (typeof price !== 'number' || !Number.isFinite(price) || price <= 0) {
+        return { ticker, error: 'Frankfurter did not return a valid EUR/USD rate.' };
+      }
+
+      const rateDate = typeof fxData.date === 'string' ? Date.parse(`${fxData.date}T00:00:00Z`) : NaN;
+      return {
+        ticker,
+        price,
+        currency: 'USD',
+        updatedAt: Number.isFinite(rateDate) ? new Date(rateDate).toISOString() : new Date().toISOString(),
+        stale: false,
+      };
+    } catch (error) {
+      console.error('Frankfurter fetch failed for EUR/USD:', error);
+      return { ticker, error: 'Unable to fetch the EUR/USD rate from Frankfurter. Please try again later.' };
+    }
+  }
+
+  // 2. Standard Finnhub fallback for stocks
   const apiKey = process.env.FINNHUB_API_KEY;
   if (!apiKey) {
     console.error('FINNHUB_API_KEY is not configured.');
     return { ticker, error: 'Quote service is not configured. Please try again later.' };
   }
 
-  const symbol = ticker === 'EURUSD=X' ? 'OANDA:EUR_USD' : ticker;
+  const symbol = normalizedTicker === 'EURUSD=X' ? 'OANDA:EUR_USD' : normalizedTicker;
   const url = new URL('https://finnhub.io/api/v1/quote');
   url.searchParams.set('symbol', symbol);
   url.searchParams.set('token', apiKey);

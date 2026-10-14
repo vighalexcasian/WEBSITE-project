@@ -13,7 +13,6 @@ const initialTransactions: Transaction[] = [
 const colors = ['#8da9ff','#69d7a2','#d6a6ff','#ffc878','#ff8f9a','#80d9e9'];
 const EUR_USD_TICKER = 'EURUSD=X';
 const money = (n:number,currency='USD') => new Intl.NumberFormat('en-US',{style:'currency',currency,maximumFractionDigits:2}).format(n);
-const exchangeRateMoney = (rate:number) => new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',minimumFractionDigits:4,maximumFractionDigits:4}).format(rate);
 const signedMoney = (n:number,currency='USD') => `${n>0?'+':''}${money(n,currency)}`;
 const dateKey = (date: string | Date) => (date instanceof Date ? date.toISOString() : date).slice(0, 10);
 
@@ -69,8 +68,6 @@ export default function Home() {
   const [sectorErrors,setSectorErrors] = useState<string[]>([]);
   const [isLoadingSectors,setIsLoadingSectors] = useState(false);
   const [eurUsdRate,setEurUsdRate] = useState<number | null>(null);
-  const [eurUsdRateUpdatedAt,setEurUsdRateUpdatedAt] = useState<string | undefined>();
-  const [eurUsdQuoteError,setEurUsdQuoteError] = useState<string | null>(null);
   const [isRefreshingQuotes,setIsRefreshingQuotes] = useState(false);
   const [tickerQuoteLookup,setTickerQuoteLookup] = useState<{
     ticker: string;
@@ -83,6 +80,7 @@ export default function Home() {
   const [showDeposits,setShowDeposits] = useState(false);
   const [filter,setFilter] = useState('All assets');
   const [performanceRange,setPerformanceRange] = useState<'3M'|'6M'|'1Y'>('3M');
+  const [showBenchmark,setShowBenchmark] = useState(true);
   const [benchmarkHistory,setBenchmarkHistory] = useState<Array<{date:string; value:number}>>([]);
   const [portfolioHistory,setPortfolioHistory] = useState<PortfolioSnapshot[]>(() => {
     if (typeof window === 'undefined') return [];
@@ -363,16 +361,11 @@ export default function Home() {
       });
 
       const fxQuote = fetched.find((result) => result.ticker === EUR_USD_TICKER)?.quote;
-      const fxResult = fetched.find((result) => result.ticker === EUR_USD_TICKER);
       const nextQuotes = Object.fromEntries(fetched.flatMap((result) => result.quote && result.ticker !== EUR_USD_TICKER ? [[result.ticker, result.quote] as const] : []));
       const failedQuotes = fetched.filter((result) => result.error);
       const staleQuotes = fetched.filter((result) => result.stale);
       if (fxQuote) {
         setEurUsdRate(fxQuote.price);
-        setEurUsdRateUpdatedAt(fxQuote.updatedAt);
-        setEurUsdQuoteError(null);
-      } else if (fxResult?.error) {
-        setEurUsdQuoteError(fxResult.error);
       }
       if (Object.keys(nextQuotes).length) {
         setQuotes((prev) => ({ ...prev, ...nextQuotes }));
@@ -386,9 +379,6 @@ export default function Home() {
       );
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unable to refresh quotes.';
-      if (uniqueTickers.includes(EUR_USD_TICKER)) {
-        setEurUsdQuoteError(errorMessage);
-      }
       setNotice(`Unable to refresh quotes: ${errorMessage}`);
     } finally {
       setIsRefreshingQuotes(false);
@@ -677,8 +667,8 @@ const removePosition = (ticker: string) => {
           difference={portfolioCheckDifference}
         />
       </section>
-      <section className="content-grid grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <div className="panel"><div className="panel-heading"><div><h2 className="panel-title">Portfolio performance</h2><div className="panel-subtitle">Daily gains rebased to 0% at the last available observation on or before each range starts</div></div><div style={{display:'flex',gap:8}}>{['3M','6M','1Y'].map((range) => (
+      <section className="content-grid grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.65fr)_minmax(0,1fr)]">
+        <div className="panel performance-panel"><div className="panel-heading"><div><h2 className="panel-title">Portfolio performance</h2><div className="panel-subtitle">Daily gains rebased to 0% at the last available observation on or before each range starts</div></div><div className="performance-controls"><div style={{display:'flex',gap:8}}>{['3M','6M','1Y'].map((range) => (
           <button
             key={range}
             className="button-secondary"
@@ -694,7 +684,7 @@ const removePosition = (ticker: string) => {
           >
             {range}
           </button>
-        ))}</div></div><div className="chart-legend"><span><i className="legend-dot" style={{background:'var(--blue)'}}/>Portfolio gain %</span><span><i className="legend-dot" style={{background:'#7d8aa8'}}/>S&amp;P 500 gain %</span></div><div className="chart-wrap"><ResponsiveContainer width="100%" height="100%"><AreaChart data={visiblePerformanceSeries} margin={{top:18,right:4,left:-18,bottom:0}}><defs><linearGradient id="valueGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#8da9ff" stopOpacity={0.26}/><stop offset="100%" stopColor="#8da9ff" stopOpacity={0}/></linearGradient><linearGradient id="benchmarkGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#7d8aa8" stopOpacity={0.18}/><stop offset="100%" stopColor="#7d8aa8" stopOpacity={0}/></linearGradient></defs><CartesianGrid stroke="#252a35" strokeDasharray="3 5" vertical={false}/><XAxis dataKey="date" ticks={performanceMonthTicks} tick={{fill:'#788397',fontSize:10}} axisLine={false} tickLine={false} interval={0} tickFormatter={(value:string)=>new Date(`${value}T00:00:00`).toLocaleDateString('en-US',{month:'short'})}/><YAxis tick={{fill:'#788397',fontSize:10}} axisLine={false} tickLine={false} tickFormatter={v=>`${v >= 0 ? '+' : ''}${Number(v).toFixed(0)}%`}/><Tooltip contentStyle={{background:'#171b25',border:'1px solid #303746',borderRadius:9,fontSize:12}} labelFormatter={(label)=>new Date(`${label}T00:00:00`).toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'})} formatter={(value, name) => [`${Number(value).toFixed(2)}%`, name === 'portfolio' ? 'Portfolio gain %' : 'S&P 500 gain %']} /><Area type="monotone" dataKey="portfolio" stroke="#8da9ff" strokeWidth={2} fill="url(#valueGradient)"/><Area type="monotone" dataKey="benchmark" stroke="#7d8aa8" strokeWidth={2} fill="url(#benchmarkGradient)" strokeDasharray="5 5"/></AreaChart></ResponsiveContainer></div></div>
+        ))}</div><button className="button-secondary benchmark-toggle" type="button" aria-pressed={showBenchmark} onClick={() => setShowBenchmark((visible) => !visible)}>S&amp;P 500 {showBenchmark ? 'ON' : 'OFF'}</button></div></div><div className="chart-legend"><span><i className="legend-dot" style={{background:'var(--blue)'}}/>Portfolio gain %</span>{showBenchmark && <span><i className="legend-dot" style={{background:'#7d8aa8'}}/>S&amp;P 500 gain %</span>}</div><div className="chart-wrap"><ResponsiveContainer width="100%" height="100%"><AreaChart data={visiblePerformanceSeries} margin={{top:18,right:4,left:-18,bottom:0}}><defs><linearGradient id="valueGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#8da9ff" stopOpacity={0.26}/><stop offset="100%" stopColor="#8da9ff" stopOpacity={0}/></linearGradient><linearGradient id="benchmarkGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#7d8aa8" stopOpacity={0.18}/><stop offset="100%" stopColor="#7d8aa8" stopOpacity={0}/></linearGradient></defs><CartesianGrid stroke="#252a35" strokeDasharray="3 5" vertical={false}/><XAxis dataKey="date" ticks={performanceMonthTicks} tick={{fill:'#788397',fontSize:10}} axisLine={false} tickLine={false} interval={0} tickFormatter={(value:string)=>new Date(`${value}T00:00:00`).toLocaleDateString('en-US',{month:'short'})}/><YAxis tick={{fill:'#788397',fontSize:10}} axisLine={false} tickLine={false} tickFormatter={v=>`${v >= 0 ? '+' : ''}${Number(v).toFixed(0)}%`}/><Tooltip contentStyle={{background:'#171b25',border:'1px solid #303746',borderRadius:9,fontSize:12}} labelFormatter={(label)=>new Date(`${label}T00:00:00`).toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'})} formatter={(value, name) => [`${Number(value).toFixed(2)}%`, name === 'portfolio' ? 'Portfolio gain %' : 'S&P 500 gain %']} /><Area type="monotone" dataKey="portfolio" stroke="#8da9ff" strokeWidth={2} fill="url(#valueGradient)"/>{showBenchmark && <Area type="monotone" dataKey="benchmark" stroke="#7d8aa8" strokeWidth={2} fill="url(#benchmarkGradient)" strokeDasharray="5 5"/>}</AreaChart></ResponsiveContainer></div></div>
         <div className="panel"><div className="panel-heading"><div><h2 className="panel-title">Asset allocation</h2><div className="panel-subtitle">Sector exposure by current market value</div></div><span className="pill">{allocation.length} assets</span></div>
           {allocation.length > 0 && <div className="sector-allocation">
             {totalPortfolioMarketValue === null
@@ -733,23 +723,6 @@ const removePosition = (ticker: string) => {
                 </div>
               ))
               : <div className="empty">Add a transaction to see allocation.</div>}
-            <div className="exchange-rate-card" role="status" aria-label="EUR/USD exchange rate">
-              <div>
-                <strong>EUR / USD</strong>
-                <small>Frankfurter reference rate</small>
-              </div>
-              <strong>
-                {eurUsdRate !== null
-                  ? `€1 = ${exchangeRateMoney(eurUsdRate)}`
-                  : eurUsdQuoteError
-                    ? 'Unavailable'
-                    : 'Loading…'}
-              </strong>
-              {eurUsdRateUpdatedAt && <small>As of {new Date(eurUsdRateUpdatedAt).toLocaleDateString('en-GB')}</small>}
-              {eurUsdQuoteError && <small className="exchange-rate-error">
-                {eurUsdRate !== null ? 'Update unavailable; showing the last available rate.' : eurUsdQuoteError}
-              </small>}
-            </div>
           </div>
           <div style={{borderTop:'1px solid var(--border)',marginTop:20,paddingTop:16,display:'flex',justifyContent:'space-between',fontSize:11}}><span style={{color:'var(--muted)'}}>Number of positions</span><span>{allocation.length}</span></div></div>
       </section>

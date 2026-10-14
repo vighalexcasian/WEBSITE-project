@@ -23,6 +23,19 @@
   @apply grid grid-cols-1 gap-4;
 }
 
+.performance-controls {
+  @apply flex flex-wrap items-center gap-2;
+}
+
+.performance-panel .chart-wrap {
+  height: 280px;
+}
+
+.performance-panel {
+  display: flex;
+  flex-direction: column;
+}
+
 .topbar {
   @apply flex flex-col items-stretch justify-between gap-4;
 }
@@ -79,39 +92,6 @@
 
 .allocation-actions {
   flex-wrap: wrap;
-}
-
-.exchange-rate-card {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  justify-content: center;
-  gap: 5px;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--panel2);
-  overflow-wrap: anywhere;
-}
-
-.exchange-rate-card > div {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.exchange-rate-card > div strong,
-.exchange-rate-card > strong {
-  font-size: 12px;
-}
-
-.exchange-rate-card small {
-  color: var(--muted);
-  font-size: 10px;
-}
-
-.exchange-rate-card .exchange-rate-error {
-  color: var(--red);
 }
 
 .chart-legend {
@@ -189,12 +169,18 @@
     grid-template-columns: 230px minmax(0, 1fr);
   }
 
+  .content-grid {
+    grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr);
+  }
+
   .metrics {
     @apply grid-cols-3;
   }
 
-  .content-grid {
-    @apply grid-cols-2;
+  .performance-panel .chart-wrap {
+    flex: 1;
+    height: auto;
+    min-height: 280px;
   }
 
   .sidebar {

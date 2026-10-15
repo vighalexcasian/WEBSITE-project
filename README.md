@@ -36,4 +36,4 @@ Then open http://localhost:3000.
 5. Add dividend/corporate-action handling and import/export (CSV).
 
 ## Calculation notes
-The portfolio engine uses a moving average-cost method to calculate realized P/L. This is a portfolio-monitoring convention, not tax advice; applicable tax cost-basis rules may differ.
+The portfolio engine uses a moving average-cost method to calculate realized P/L. Sell orders close existing long positions first, then open or increase short positions if they exceed the remaining long quantity. Buy orders close existing shorts first, then open or increase long positions. Open short P/L is calculated as short-sale proceeds less the current market value. This is a portfolio-monitoring convention, not tax advice; applicable tax cost-basis rules may differ.

@@ -636,7 +636,7 @@ const removePosition = (ticker: string) => {
   return <div className="app-shell grid grid-cols-1 lg:grid-cols-[230px_minmax(0,1fr)]">
     <aside className="sidebar">
       <div className="brand"><span>investment tracker<span style={{color:'#8da9ff'}}>.</span></span></div>
-      <div><div className="nav-label">WORKSPACE</div><div className="nav-item active"><span className="nav-icon">▦</span>Portfolio overview</div><div className="nav-item" onClick={()=>setNotice('Stock screener is planned for the next development stage.')} role="button"><span className="nav-icon">⌕</span>Stock screener <span className="tag muted-tag" style={{marginLeft:'auto'}}>Soon</span></div><div className="nav-item" onClick={()=>setNotice('Risk analytics will be added after the portfolio ledger is complete.')} role="button"><span className="nav-icon">◉</span>Risk analytics</div></div>
+      <div><div className="nav-label">WORKSPACE</div><div className="nav-item active"><span className="nav-icon">▦</span>Portfolio overview</div><div className="nav-item" onClick={()=>setNotice('Risk analytics will be added after the portfolio ledger is complete.')} role="button"><span className="nav-icon">◉</span>Risk analytics</div></div>
       <div><div className="nav-label">PREFERENCES</div><div className="nav-item" onClick={()=>setNotice('Settings and account persistence will be configured in a later step.')} role="button"><span className="nav-icon">⚙</span>Settings</div></div>
     </aside>
     <main className="main min-w-0 p-4 md:p-8">

@@ -222,6 +222,34 @@
     grid-column: auto;
   }
 
+  .deposit-form {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px !important;
+    padding: 8px 0 10px !important;
+  }
+
+  .deposit-form .field {
+    min-width: 0 !important;
+    gap: 4px;
+  }
+
+  .deposit-form .field label {
+    font-size: 10px;
+  }
+
+  .deposit-form .field input {
+    min-width: 0;
+    padding: 8px;
+    font-size: 12px;
+  }
+
+  .deposit-form > button {
+    grid-column: 1 / -1;
+    justify-self: stretch;
+    padding: 8px 12px;
+  }
+
   .table-head > div:last-child {
     width: 100%;
   }

@@ -2,16 +2,17 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Area, AreaChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { calculatePortfolio, type Transaction, type Quote } from '@/lib/portfolio';
+import { AuthForm } from '@/components/AuthForm';
+import { useAuth } from '@/components/AuthProvider';
+import { getSupabaseClient } from '@/lib/supabase';
 
-const initialTransactions: Transaction[] = [
-  { id:'t1', date:'2026-01-10', ticker:'MSFT', company:'Microsoft', type:'BUY', quantity:4, price:410, fees:1, currency:'USD' },
-  { id:'t2', date:'2026-02-03', ticker:'NOW', company:'ServiceNow', type:'BUY', quantity:2, price:920, fees:1, currency:'USD' },
-  { id:'t3', date:'2026-03-12', ticker:'AMD', company:'Advanced Micro Devices', type:'BUY', quantity:5, price:155, fees:1, currency:'USD' },
-  { id:'t4', date:'2026-04-20', ticker:'MSFT', company:'Microsoft', type:'BUY', quantity:1, price:390, fees:1, currency:'USD' },
-  { id:'t5', date:'2026-06-08', ticker:'NVDA', company:'NVIDIA', type:'BUY', quantity:3, price:145, fees:1, currency:'USD' },
-];
 const colors = ['#8da9ff','#69d7a2','#d6a6ff','#ffc878','#ff8f9a','#80d9e9'];
 const EUR_USD_TICKER = 'EURUSD=X';
+const FX_CURRENCIES = new Set(['EUR', 'CHF', 'GBP', 'RON']);
+const currencyRateTicker = (currency: string) =>
+  FX_CURRENCIES.has(currency) ? `${currency}USD=X` : null;
+const currencyFromRateTicker = (ticker: string) =>
+  [...FX_CURRENCIES].find((currency) => ticker === `${currency}USD=X`);
 const money = (n:number,currency='USD') => new Intl.NumberFormat('en-US',{style:'currency',currency,maximumFractionDigits:2}).format(n);
 const signedMoney = (n:number,currency='USD') => `${n>0?'+':''}${money(n,currency)}`;
 const dateKey = (date: string | Date) => (date instanceof Date ? date.toISOString() : date).slice(0, 10);
@@ -31,23 +32,10 @@ type QuoteApiResult = {
   price?: number;
   currency?: string;
   updatedAt?: string;
+  source?: 'finnhub' | 'yahoo-finance' | 'frankfurter';
   stale?: boolean;
   error?: string;
 };
-
-const isTransactionArray = (value: unknown): value is Transaction[] =>
-  Array.isArray(value) && value.every((transaction) =>
-    transaction &&
-    typeof transaction.id === 'string' &&
-    typeof transaction.date === 'string' &&
-    typeof transaction.ticker === 'string' &&
-    typeof transaction.company === 'string' &&
-    (transaction.type === 'BUY' || transaction.type === 'SELL') &&
-    typeof transaction.quantity === 'number' &&
-    typeof transaction.price === 'number' &&
-    typeof transaction.fees === 'number' &&
-    typeof transaction.currency === 'string'
-  );
 
 const isQuoteRecord = (value: unknown): value is Record<string, Quote> =>
   typeof value === 'object' && value !== null && Object.entries(value).every(([, quote]) =>
@@ -56,20 +44,70 @@ const isQuoteRecord = (value: unknown): value is Record<string, Quote> =>
     typeof quote.price === 'number' &&
     Number.isFinite(quote.price) &&
     typeof quote.currency === 'string' &&
-    (quote.source === 'live' || quote.source === 'sample')
+    (quote.source === 'live' ||
+      quote.source === 'sample' ||
+      quote.source === 'finnhub' ||
+      quote.source === 'yahoo-finance' ||
+      quote.source === 'frankfurter')
   );
 
-export default function Home() {
-  const [transactions,setTransactions] = useState<Transaction[]>(initialTransactions);
-  const [transactionHistory,setTransactionHistory] = useState<Transaction[]>(initialTransactions);
+const isPortfolioHistory = (value: unknown): value is PortfolioSnapshot[] =>
+  Array.isArray(value) && value.every((snapshot) =>
+    typeof snapshot === 'object' &&
+    snapshot !== null &&
+    typeof snapshot.date === 'string' &&
+    typeof snapshot.marketValue === 'number' &&
+    typeof snapshot.marketCost === 'number' &&
+    typeof snapshot.unrealizedPL === 'number' &&
+    typeof snapshot.realizedPL === 'number' &&
+    typeof snapshot.totalPL === 'number' &&
+    typeof snapshot.uninvestedCash === 'number'
+  );
+
+const transactionFromRow = (value: unknown): Transaction => {
+  if (typeof value !== 'object' || value === null) throw new Error('The database returned an invalid transaction.');
+  const row = value as Record<string, unknown>;
+  if (
+    typeof row.id !== 'string' ||
+    typeof row.date !== 'string' ||
+    typeof row.ticker !== 'string' ||
+    typeof row.company !== 'string' ||
+    (row.type !== 'BUY' && row.type !== 'SELL') ||
+    !Number.isFinite(Number(row.quantity)) ||
+    !Number.isFinite(Number(row.price)) ||
+    !Number.isFinite(Number(row.fees)) ||
+    (row.cfd_cost !== null && row.cfd_cost !== undefined &&
+      (!Number.isFinite(Number(row.cfd_cost)) || Number(row.cfd_cost) <= 0)) ||
+    typeof row.currency !== 'string'
+  ) {
+    throw new Error('The database returned a transaction with invalid fields.');
+  }
+  return {
+    id: row.id,
+    date: row.date,
+    ticker: row.ticker,
+    company: row.company,
+    type: row.type,
+    quantity: Number(row.quantity),
+    price: Number(row.price),
+    fees: Number(row.fees),
+    currency: row.currency,
+    cfdCost: row.cfd_cost === null || row.cfd_cost === undefined ? null : Number(row.cfd_cost),
+  };
+};
+
+function PortfolioDashboard({ userId, userEmail }: { userId: string; userEmail: string | null }) {
+  const [transactions,setTransactions] = useState<Transaction[]>([]);
+  const [transactionHistory,setTransactionHistory] = useState<Transaction[]>([]);
   const [quotes,setQuotes] = useState<Record<string,Quote>>({});
   const [portfolioDataLoaded,setPortfolioDataLoaded] = useState(false);
+  const [accountDataLoaded,setAccountDataLoaded] = useState(false);
   const [sectors,setSectors] = useState<Record<string,string | null>>({});
   const [industries,setIndustries] = useState<Record<string,string | null>>({});
   const [sectorErrors,setSectorErrors] = useState<string[]>([]);
   const [isLoadingSectors,setIsLoadingSectors] = useState(false);
   const [selectedSector,setSelectedSector] = useState<string | null>(null);
-  const [eurUsdRate,setEurUsdRate] = useState<number | null>(null);
+  const [currencyRates,setCurrencyRates] = useState<Record<string, number>>({ USD: 1 });
   const [isRefreshingQuotes,setIsRefreshingQuotes] = useState(false);
   const [tickerQuoteLookup,setTickerQuoteLookup] = useState<{
     ticker: string;
@@ -78,69 +116,190 @@ export default function Home() {
     error?: string;
   } | null>(null);
   const [showAdd,setShowAdd] = useState(false);
+  const [isSubmittingTransaction,setIsSubmittingTransaction] = useState(false);
+  const [transactionFormError,setTransactionFormError] = useState<string | null>(null);
   const [showTransactions,setShowTransactions] = useState(false);
   const [showDeposits,setShowDeposits] = useState(false);
   const [filter,setFilter] = useState('All assets');
   const [performanceRange,setPerformanceRange] = useState<'3M'|'6M'|'1Y'>('3M');
   const [showBenchmark,setShowBenchmark] = useState(true);
   const [benchmarkHistory,setBenchmarkHistory] = useState<Array<{date:string; value:number}>>([]);
-  const [portfolioHistory,setPortfolioHistory] = useState<PortfolioSnapshot[]>(() => {
-    if (typeof window === 'undefined') return [];
-
-    try {
-      const saved = window.localStorage.getItem('portfolio-history');
-      return saved ? (JSON.parse(saved) as PortfolioSnapshot[]) : [];
-    } catch {
-      return [];
-    }
-  });
+  const [portfolioHistory,setPortfolioHistory] = useState<PortfolioSnapshot[]>([]);
   const [notice,setNotice] = useState('Loading live market data…');
   const [editingTicker,setEditingTicker] = useState<string | null>(null);
   const [manualCash,setManualCash] = useState(25000);
   const [manualRealizedPL,setManualRealizedPL] = useState<Record<string, number>>({});
   const [deposits,setDeposits] = useState<Array<{id:string;date:string;value:number}>>([]);
   const [depositForm,setDepositForm] = useState({date:new Date().toISOString().slice(0,10),value:''});
-  const [form,setForm] = useState({date:new Date().toISOString().slice(0,10),ticker:'',company:'',type:'BUY',quantity:'',price:'',fees:'0',currency:'USD'});
+  const [form,setForm] = useState({date:new Date().toISOString().slice(0,10),ticker:'',type:'BUY',quantity:'',price:'',fees:'0',currency:'USD',cfdCost:''});
   const portfolio = useMemo(()=>calculatePortfolio(transactions,quotes),[transactions,quotes]);
 
   useEffect(() => {
-    try {
-      const savedTransactions = window.localStorage.getItem('portfolio-transactions');
-      const savedHistory = window.localStorage.getItem('portfolio-transaction-history');
-      const savedQuotes = window.localStorage.getItem('portfolio-quotes');
-      const parsedTransactions: unknown = savedTransactions ? JSON.parse(savedTransactions) : initialTransactions;
-      const parsedHistory: unknown = savedHistory ? JSON.parse(savedHistory) : parsedTransactions;
-      const parsedQuotes: unknown = savedQuotes ? JSON.parse(savedQuotes) : {};
+    let active = true;
+    setPortfolioDataLoaded(false);
+    setAccountDataLoaded(false);
 
-      if (!isTransactionArray(parsedTransactions) || !isTransactionArray(parsedHistory) || !isQuoteRecord(parsedQuotes)) {
-        throw new Error('Saved portfolio data has an invalid format.');
+    const loadPortfolio = async () => {
+      try {
+        const supabase = getSupabaseClient();
+        const { data: { user }, error: userError } = await supabase.auth.getUser();
+        if (userError) {
+          console.error('ERROR MESSAGE:', userError.message);
+          throw userError;
+        }
+        if (!user || user.id !== userId) throw new Error('Your session changed. Please sign in again.');
+
+        const { data: settings, error: settingsError } = await supabase
+          .from('user_settings')
+          .select('cash_balance')
+          .eq('user_id', user.id)
+          .maybeSingle();
+        if (settingsError) {
+          console.error('ERROR MESSAGE:', settingsError.message, settingsError.details, settingsError.hint);
+          throw settingsError;
+        }
+
+        let cashBalance = 25000;
+        if (settings) {
+          cashBalance = Number(settings.cash_balance);
+          if (!Number.isFinite(cashBalance) || cashBalance < 0) {
+            throw new Error('Your saved cash balance is invalid.');
+          }
+        } else {
+          const { data: insertedSettings, error: insertSettingsError } = await supabase
+            .from('user_settings')
+            .insert({ user_id: user.id, cash_balance: cashBalance })
+            .select('cash_balance')
+            .single();
+          if (insertSettingsError) {
+            console.error('ERROR MESSAGE:', insertSettingsError.message, insertSettingsError.details, insertSettingsError.hint);
+            throw insertSettingsError;
+          }
+          cashBalance = Number(insertedSettings.cash_balance);
+          if (!Number.isFinite(cashBalance) || cashBalance < 0) {
+            throw new Error('Supabase returned an invalid default cash balance.');
+          }
+        }
+
+        const { data: depositRows, error: depositsError } = await supabase
+          .from('deposits')
+          .select('id,date,value')
+          .eq('user_id', user.id)
+          .order('date', { ascending: true });
+        if (depositsError) {
+          console.error('ERROR MESSAGE:', depositsError.message, depositsError.details, depositsError.hint);
+          throw depositsError;
+        }
+        if (!Array.isArray(depositRows)) throw new Error('The deposits response was invalid.');
+        const loadedDeposits = depositRows.map((value) => {
+          if (typeof value !== 'object' || value === null) throw new Error('The database returned an invalid deposit.');
+          const row = value as Record<string, unknown>;
+          const depositValue = Number(row.value);
+          if (typeof row.id !== 'string' || typeof row.date !== 'string' || !Number.isFinite(depositValue) || depositValue <= 0) {
+            throw new Error('The database returned a deposit with invalid fields.');
+          }
+          return { id: row.id, date: row.date, value: depositValue };
+        });
+
+        const { data, error } = await supabase
+          .from('transactions')
+          .select('id,date,ticker,company,type,quantity,price,fees,currency,cfd_cost')
+          .eq('user_id', user.id)
+          .order('date', { ascending: true });
+        if (error) {
+          console.error('ERROR MESSAGE:', error.message, error.details, error.hint);
+          throw error;
+        }
+        if (!Array.isArray(data)) throw new Error('The transactions response was invalid.');
+
+        const loadedTransactions = data.map(transactionFromRow);
+        if (!active) return;
+        setTransactions(loadedTransactions);
+        setTransactionHistory(loadedTransactions);
+        setManualCash(cashBalance);
+        setDeposits(loadedDeposits);
+        setAccountDataLoaded(true);
+
+        try {
+          const savedQuotes = window.localStorage.getItem('portfolio-quotes');
+          const parsedQuotes: unknown = savedQuotes ? JSON.parse(savedQuotes) : {};
+          if (!isQuoteRecord(parsedQuotes)) throw new Error('Saved quote data has an invalid format.');
+          setQuotes(parsedQuotes);
+        } catch (storageError) {
+          setNotice(storageError instanceof Error ? `Unable to restore cached quotes: ${storageError.message}` : 'Unable to restore cached quotes.');
+        }
+
+        try {
+          const savedHistory = window.localStorage.getItem(`portfolio-history:${user.id}`);
+          const parsedHistory: unknown = savedHistory ? JSON.parse(savedHistory) : [];
+          if (!isPortfolioHistory(parsedHistory)) throw new Error('Saved performance history has an invalid format.');
+          setPortfolioHistory(parsedHistory);
+        } catch (storageError) {
+          setNotice(storageError instanceof Error ? `Unable to restore performance history: ${storageError.message}` : 'Unable to restore performance history.');
+        }
+      } catch (error) {
+        if (active) {
+          setNotice(error instanceof Error ? `Unable to load your portfolio: ${error.message}` : 'Unable to load your portfolio.');
+        }
+      } finally {
+        if (active) setPortfolioDataLoaded(true);
       }
+    };
 
-      setTransactions(parsedTransactions);
-      setTransactionHistory(parsedHistory);
-      setQuotes(parsedQuotes);
-    } catch (error) {
-      setNotice(error instanceof Error ? `Unable to restore saved portfolio: ${error.message}` : 'Unable to restore saved portfolio.');
-    } finally {
-      setPortfolioDataLoaded(true);
-    }
-  }, []);
+    void loadPortfolio();
+    return () => {
+      active = false;
+    };
+  }, [userId]);
+
+  useEffect(() => {
+    if (!accountDataLoaded) return;
+    let active = true;
+    const timeout = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const supabase = getSupabaseClient();
+          const { data: { user }, error: userError } = await supabase.auth.getUser();
+          if (userError) {
+            console.error('ERROR MESSAGE:', userError.message);
+            throw userError;
+          }
+          if (!user || user.id !== userId) throw new Error('Your session changed. Please sign in again.');
+
+          const { error } = await supabase
+            .from('user_settings')
+            .upsert({ user_id: user.id, cash_balance: manualCash }, { onConflict: 'user_id' });
+          if (error) {
+            console.error('ERROR MESSAGE:', error.message, error.details, error.hint);
+            throw error;
+          }
+        } catch (error) {
+          if (active) {
+            setNotice(error instanceof Error ? `Could not save uninvested cash: ${error.message}` : 'Could not save uninvested cash.');
+          }
+        }
+      })();
+    }, 500);
+
+    return () => {
+      active = false;
+      window.clearTimeout(timeout);
+    };
+  }, [accountDataLoaded, manualCash, userId]);
 
   useEffect(() => {
     if (!portfolioDataLoaded) return;
     try {
-      window.localStorage.setItem('portfolio-transactions', JSON.stringify(transactions));
-      window.localStorage.setItem('portfolio-transaction-history', JSON.stringify(transactionHistory));
       window.localStorage.setItem('portfolio-quotes', JSON.stringify(quotes));
     } catch (error) {
-      setNotice(error instanceof Error ? `Unable to save portfolio data: ${error.message}` : 'Unable to save portfolio data.');
+      setNotice(error instanceof Error ? `Unable to save cached quotes: ${error.message}` : 'Unable to save cached quotes.');
     }
-  }, [portfolioDataLoaded, transactions, transactionHistory, quotes]);
+  }, [portfolioDataLoaded, quotes]);
 
   const convertToUSD = useCallback((amount:number,currency:string):number|null => {
-    if (currency !== 'EUR') return amount;
-    return eurUsdRate !== null ? amount * eurUsdRate : null;
-  }, [eurUsdRate]);
+    const rate = currencyRates[currency];
+    return typeof rate === 'number' && Number.isFinite(rate) ? amount * rate : null;
+  }, [currencyRates]);
   const totalPortfolioMarketCost = useMemo(() => {
     let total = 0;
     for (const holding of portfolio.holdings) {
@@ -162,10 +321,9 @@ export default function Home() {
   const totalPortfolioUnrealizedPL = useMemo(() => {
     let total = 0;
     for (const holding of portfolio.holdings) {
-      const marketValue = convertToUSD(holding.marketValue, holding.currency);
-      const costBasis = convertToUSD(holding.costBasis, holding.costCurrency);
-      if (marketValue === null || costBasis === null) return null;
-      total += holding.side === 'SHORT' ? costBasis - marketValue : marketValue - costBasis;
+      const unrealizedPL = convertToUSD(holding.unrealizedPL, holding.currency);
+      if (unrealizedPL === null) return null;
+      total += unrealizedPL;
     }
     return total;
   }, [portfolio.holdings, convertToUSD]);
@@ -183,7 +341,13 @@ export default function Home() {
     return total;
   }, [manualRealizedPL, portfolio.holdings, portfolio.realizedPLByTicker, transactions, convertToUSD]);
   const quoteTickers = useMemo(
-    () => [...new Set([...transactions.map((transaction) => transaction.ticker), EUR_USD_TICKER])],
+    () => [...new Set([
+      ...transactions.map((transaction) => transaction.ticker),
+      EUR_USD_TICKER,
+      ...transactions
+        .map((transaction) => currencyRateTicker(transaction.currency))
+        .filter((ticker): ticker is string => ticker !== null),
+    ])],
     [transactions]
   );
   const uninvestedCashPercent = useMemo(
@@ -254,10 +418,8 @@ export default function Home() {
       const costBasis = convertToUSD(holding.costBasis, holding.costCurrency);
       const marketValue = convertToUSD(holding.marketValue, holding.currency);
       if (costBasis === null || marketValue === null) return null;
-      const unrealizedPL = holding.side === 'SHORT'
-        ? costBasis - marketValue
-        : marketValue - costBasis;
-      total += costBasis + (holding.side === 'SHORT' ? -unrealizedPL : unrealizedPL);
+      const unrealizedPL = holding.unrealizedPL;
+      total += holding.side === 'SHORT' ? marketValue : costBasis + unrealizedPL;
     }
     return total;
   }, [portfolio.holdings, convertToUSD]);
@@ -345,7 +507,7 @@ export default function Home() {
       const quote: Quote = {
         price: data.price,
         currency: data.currency ?? 'USD',
-        source: 'live',
+        source: data.source ?? 'finnhub',
         updatedAt: data.updatedAt,
       };
       setQuotes((previous) => ({ ...previous, [normalizedTicker]: quote }));
@@ -393,19 +555,22 @@ export default function Home() {
           quote: {
             price: quoteResult.price,
             currency: quoteResult.currency ?? 'USD',
-            source: 'live' as const,
+            source: quoteResult.source ?? 'finnhub',
             updatedAt: quoteResult.updatedAt,
           },
         };
       });
 
-      const fxQuote = fetched.find((result) => result.ticker === EUR_USD_TICKER)?.quote;
-      const nextQuotes = Object.fromEntries(fetched.flatMap((result) => result.quote && result.ticker !== EUR_USD_TICKER ? [[result.ticker, result.quote] as const] : []));
+      const rates = Object.fromEntries(fetched.flatMap((result) => {
+        const currency = currencyFromRateTicker(result.ticker);
+        return result.quote && currency ? [[currency, result.quote.price] as const] : [];
+      }));
+      const nextQuotes = Object.fromEntries(fetched.flatMap((result) =>
+        result.quote && !currencyFromRateTicker(result.ticker) ? [[result.ticker, result.quote] as const] : []
+      ));
       const failedQuotes = fetched.filter((result) => result.error);
       const staleQuotes = fetched.filter((result) => result.stale);
-      if (fxQuote) {
-        setEurUsdRate(fxQuote.price);
-      }
+      if (Object.keys(rates).length) setCurrencyRates((previous) => ({ ...previous, ...rates }));
       if (Object.keys(nextQuotes).length) {
         setQuotes((prev) => ({ ...prev, ...nextQuotes }));
       }
@@ -498,6 +663,7 @@ export default function Home() {
   }, [sectorCompanies]);
 
   useEffect(() => {
+    if (!portfolioDataLoaded) return;
     if (
       totalPortfolioMarketValue === null ||
       totalPortfolioMarketCost === null ||
@@ -521,12 +687,12 @@ export default function Home() {
       const next = previous && previous.date === dateKey ? [...prev.slice(0, -1), snapshot] : [...prev, snapshot];
 
       if (typeof window !== 'undefined') {
-        window.localStorage.setItem('portfolio-history', JSON.stringify(next));
+        window.localStorage.setItem(`portfolio-history:${userId}`, JSON.stringify(next));
       }
 
       return next;
     });
-  }, [manualCash, totalPortfolioMarketValue, totalPortfolioMarketCost, totalPortfolioUnrealizedPL, totalManualRealizedPL]);
+  }, [portfolioDataLoaded, userId, manualCash, totalPortfolioMarketValue, totalPortfolioMarketCost, totalPortfolioUnrealizedPL, totalManualRealizedPL]);
 
   useEffect(() => {
     let active = true;
@@ -564,8 +730,9 @@ export default function Home() {
     };
   }, []);
   const resetForm = () => {
-    setForm({date:new Date().toISOString().slice(0,10),ticker:'',company:'',type:'BUY',quantity:'',price:'',fees:'0',currency:'USD'});
+    setForm({date:new Date().toISOString().slice(0,10),ticker:'',type:'BUY',quantity:'',price:'',fees:'0',currency:'USD',cfdCost:''});
     setTickerQuoteLookup(null);
+    setTransactionFormError(null);
   };
   const openAddTransaction = () => {
     setEditingTicker(null);
@@ -576,7 +743,7 @@ export default function Home() {
     const latest = [...transactions].filter(t=>t.ticker===ticker).sort((a,b)=>b.date.localeCompare(a.date))[0];
     if (!latest) return;
     setEditingTicker(ticker);
-    setForm({date:latest.date,ticker:latest.ticker,company:latest.company,type:latest.type,quantity:String(latest.quantity),price:String(latest.price),fees:String(latest.fees),currency:latest.currency});
+    setForm({date:latest.date,ticker:latest.ticker,type:latest.type,quantity:String(latest.quantity),price:String(latest.price),fees:String(latest.fees),currency:latest.currency,cfdCost:latest.cfdCost == null ? '' : String(latest.cfdCost)});
     setShowAdd(true);
   };
   const closeTransactionModal = () => {
@@ -584,74 +751,220 @@ export default function Home() {
     setEditingTicker(null);
     resetForm();
   };
-  const addTransaction = (e:React.FormEvent) => {
-    e.preventDefault();
-    const ticker=form.ticker.trim().toUpperCase(); const quantity=Number(form.quantity); const price=Number(form.price); const fees=Number(form.fees||0);
-    if(!ticker||!quantity||quantity<=0||!price||price<=0){setNotice('Enter a valid ticker, quantity and price.');return;}
-    const existing=transactions.filter(t=>t.ticker===ticker).at(-1);
-    const tx:Transaction={id:crypto.randomUUID(),date:form.date,ticker,company:form.company.trim()||existing?.company||ticker,type:form.type as 'BUY'|'SELL',quantity,price,fees,currency:form.currency};
-
-    if (editingTicker) {
-      const latestTx = [...transactions].filter(t=>t.ticker===editingTicker).sort((a,b)=>b.date.localeCompare(a.date))[0];
-      if (!latestTx) {
-        setNotice('The position you tried to edit no longer exists.');
-        return;
-      }
-      const next = transactions.map(t => t.id===latestTx.id ? { ...t, date:form.date, ticker, company:form.company.trim()||existing?.company||ticker, type:form.type as 'BUY'|'SELL', quantity, price, fees, currency:form.currency } : t);
-      try {
-        calculatePortfolio(next,quotes);
-        setTransactions(next);
-        setTransactionHistory((prev)=>
-          prev.map((t) => t.id === latestTx.id ? { ...t, date: form.date, ticker, company: form.company.trim() || existing?.company || ticker, type: form.type as 'BUY' | 'SELL', quantity, price, fees, currency: form.currency } : t)
-        );
-        setShowAdd(false);
-        setEditingTicker(null);
-        resetForm();
-        setNotice(`${ticker} position updated.`);
-      } catch(err) { setNotice(err instanceof Error?err.message:'Could not update position.'); }
-      return;
+  const getActiveUser = async () => {
+    const { data: { user }, error } = await getSupabaseClient().auth.getUser();
+    if (error) {
+      console.error('ERROR MESSAGE:', error.message);
+      throw error;
     }
+    if (!user || user.id !== userId) throw new Error('Your session expired. Sign in again before changing your portfolio.');
+    return user;
+  };
+  const addTransaction = async (e:React.FormEvent) => {
+    e.preventDefault();
+    if (isSubmittingTransaction) return;
+    setTransactionFormError(null);
+    setIsSubmittingTransaction(true);
 
-    try { calculatePortfolio([...transactions,tx],quotes); } catch(err) { setNotice(err instanceof Error?err.message:'Could not add transaction.'); return; }
-    setTransactions(prev=>[...prev,tx]);
-    setTransactionHistory(prev=>[...prev,tx]);
-    setQuotes(prev=>({...prev,[ticker]:prev[ticker]??{price,currency:form.currency,source:'sample'}}));
-    setShowAdd(false); setNotice(`Transaction added. Fetching the latest Yahoo Finance price for ${ticker}…`); resetForm();
-    void refreshQuotes([ticker]);
+    try {
+      const ticker = form.ticker.trim().toUpperCase();
+      const quantity = Number.parseFloat(form.quantity);
+      const price = Number.parseFloat(form.price);
+      const fees = form.fees.trim() ? Number.parseFloat(form.fees) : 0;
+      const cfdCost = form.type === 'SELL' ? Number.parseFloat(form.cfdCost) : null;
+      if (!ticker || !Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(price) || price <= 0 || !Number.isFinite(fees) || fees < 0) {
+        throw new Error('Enter a valid ticker, positive share quantity and price, and non-negative fees.');
+      }
+      if (form.type === 'SELL' && (cfdCost === null || !Number.isFinite(cfdCost) || cfdCost <= 0)) {
+        throw new Error('Enter a positive CFD investment cost for sell transactions.');
+      }
+
+      const supabase = getSupabaseClient();
+      const { data: { user }, error: authError } = await supabase.auth.getUser();
+      if (authError) {
+        console.error('ERROR MESSAGE:', authError.message);
+        throw authError;
+      }
+      if (!user || user.id !== userId) {
+        throw new Error('You are not signed in. Please sign in again before saving this transaction.');
+      }
+
+      const existing = transactions.filter((transaction) => transaction.ticker === ticker).at(-1);
+      const transactionData = {
+        date: form.date,
+        ticker,
+        company: existing?.company || ticker,
+        type: form.type as 'BUY' | 'SELL',
+        quantity,
+        price,
+        fees,
+        currency: form.currency,
+      };
+      const transactionDataWithCfdCost = { ...transactionData, cfd_cost: cfdCost };
+
+      if (editingTicker) {
+        const latestTransaction = [...transactions]
+          .filter((transaction) => transaction.ticker === editingTicker)
+          .sort((a, b) => b.date.localeCompare(a.date))[0];
+        if (!latestTransaction) throw new Error('The position you tried to edit no longer exists.');
+
+        const updatedTransaction: Transaction = { ...latestTransaction, ...transactionData, cfdCost };
+        const nextTransactions = transactions.map((transaction) =>
+          transaction.id === latestTransaction.id ? updatedTransaction : transaction
+        );
+        calculatePortfolio(nextTransactions, quotes);
+
+        const { error } = await supabase
+          .from('transactions')
+          .update(transactionDataWithCfdCost)
+          .eq('id', latestTransaction.id)
+          .eq('user_id', user.id)
+          .select('id')
+          .single();
+        if (error) {
+          console.error('ERROR MESSAGE:', error.message, error.details, error.hint);
+          throw error;
+        }
+
+        setTransactions(nextTransactions);
+        setTransactionHistory((previous) => previous.map((transaction) =>
+          transaction.id === latestTransaction.id ? updatedTransaction : transaction
+        ));
+        setNotice(`${ticker} position updated.`);
+      } else {
+        const transaction: Transaction = { id: crypto.randomUUID(), ...transactionData, cfdCost };
+        calculatePortfolio([...transactions, transaction], quotes);
+
+        const payload = { ...transactionDataWithCfdCost, user_id: user.id };
+        console.log('INSERT PAYLOAD:', payload);
+        const { data, error } = await supabase
+          .from('transactions')
+          .insert(payload)
+          .select('id,date,ticker,company,type,quantity,price,fees,currency,cfd_cost')
+          .single();
+        if (error) {
+          console.error('ERROR MESSAGE:', error.message, error.details, error.hint);
+          throw error;
+        }
+        if (!data) throw new Error('Supabase did not return the saved transaction.');
+
+        const savedTransaction = transactionFromRow(data);
+        setTransactions((previous) => [...previous, savedTransaction]);
+        setTransactionHistory((previous) => [...previous, savedTransaction]);
+        setQuotes((previous) => ({
+          ...previous,
+          [ticker]: previous[ticker] ?? { price, currency: form.currency, source: 'sample' },
+        }));
+        setNotice(`Transaction added. Fetching the latest Finnhub price for ${ticker}…`);
+        void refreshQuotes([ticker]);
+      }
+
+      setShowAdd(false);
+      setEditingTicker(null);
+      resetForm();
+    } catch (error) {
+      console.error('Transaction submission error:', error);
+      const message = error instanceof Error ? error.message : 'Could not save transaction. Please try again.';
+      setTransactionFormError(message);
+      setNotice(message);
+    } finally {
+      setIsSubmittingTransaction(false);
+    }
   };
-  const removeTransaction = (id:string) => {
-    const nextHistory = transactionHistory.filter(t=>t.id!==id);
-    setTransactionHistory(nextHistory);
-    setNotice('Transaction removed from history.');
+  const removeTransaction = async (id:string) => {
+    try {
+      const user = await getActiveUser();
+      const { error } = await getSupabaseClient()
+        .from('transactions')
+        .delete()
+        .eq('id', id)
+        .eq('user_id', user.id)
+        .select('id')
+        .single();
+      if (error) {
+        console.error('ERROR MESSAGE:', error.message, error.details, error.hint);
+        throw error;
+      }
+      setTransactions((prev) => prev.filter((transaction) => transaction.id !== id));
+      setTransactionHistory((prev) => prev.filter((transaction) => transaction.id !== id));
+      setNotice('Transaction removed from your portfolio.');
+    } catch (error) {
+      setNotice(error instanceof Error ? `Could not remove transaction: ${error.message}` : 'Could not remove transaction.');
+    }
   };
-  const addDeposit = (e:React.FormEvent) => {
+  const addDeposit = async (e:React.FormEvent) => {
     e.preventDefault();
     const value = Number(depositForm.value);
     if (!depositForm.date || !Number.isFinite(value) || value <= 0) {
       setNotice('Enter a valid date and deposit value.');
       return;
     }
-    setDeposits(prev => [{ id: crypto.randomUUID(), date: depositForm.date, value }, ...prev]);
-    setDepositForm({ date: new Date().toISOString().slice(0,10), value: '' });
-    setNotice('Deposit added.');
+    try {
+      const user = await getActiveUser();
+      const { data, error } = await getSupabaseClient()
+        .from('deposits')
+        .insert({ user_id: user.id, date: depositForm.date, value })
+        .select('id,date,value')
+        .single();
+      if (error) {
+        console.error('ERROR MESSAGE:', error.message, error.details, error.hint);
+        throw error;
+      }
+      if (!data || typeof data.id !== 'string' || typeof data.date !== 'string' || !Number.isFinite(Number(data.value))) {
+        throw new Error('Supabase returned an invalid saved deposit.');
+      }
+      setDeposits((previous) => [...previous, { id: data.id, date: data.date, value: Number(data.value) }]);
+      setDepositForm({ date: new Date().toISOString().slice(0,10), value: '' });
+      setNotice('Deposit added.');
+    } catch (error) {
+      setNotice(error instanceof Error ? `Could not add deposit: ${error.message}` : 'Could not add deposit.');
+    }
   };
-  const removeDeposit = (id:string) => {
-    setDeposits(prev => prev.filter(d => d.id !== id));
-    setNotice('Deposit removed.');
+  const removeDeposit = async (id:string) => {
+    try {
+      const user = await getActiveUser();
+      const { error } = await getSupabaseClient()
+        .from('deposits')
+        .delete()
+        .eq('id', id)
+        .eq('user_id', user.id)
+        .select('id')
+        .single();
+      if (error) {
+        console.error('ERROR MESSAGE:', error.message, error.details, error.hint);
+        throw error;
+      }
+      setDeposits((previous) => previous.filter((deposit) => deposit.id !== id));
+      setNotice('Deposit removed.');
+    } catch (error) {
+      setNotice(error instanceof Error ? `Could not remove deposit: ${error.message}` : 'Could not remove deposit.');
+    }
   };
 
-const removePosition = (ticker: string) => {
+const removePosition = async (ticker: string) => {
   const confirmed = window.confirm(
     `Remove ${ticker} and all its transactions from this portfolio?`
   );
 
   if (!confirmed) return;
 
-  const next = transactions.filter(
-    (transaction) => transaction.ticker !== ticker
-  );
-
   try {
+    const user = await getActiveUser();
+    const { data: deletedTransactions, error } = await getSupabaseClient()
+      .from('transactions')
+      .delete()
+      .eq('user_id', user.id)
+      .eq('ticker', ticker)
+      .select('id');
+    if (error) {
+      console.error('ERROR MESSAGE:', error.message, error.details, error.hint);
+      throw error;
+    }
+    if (!deletedTransactions?.length) {
+      setNotice(`No saved transactions found for ${ticker}.`);
+      return;
+    }
+    const next = transactions.filter((transaction) => transaction.ticker !== ticker);
     calculatePortfolio(next, quotes);
     setTransactions(next);
     setTransactionHistory((prev) => prev.filter((transaction) => transaction.ticker !== ticker));
@@ -675,6 +988,15 @@ const removePosition = (ticker: string) => {
   }
 };
 
+  const signOut = async () => {
+    try {
+      const { error } = await getSupabaseClient().auth.signOut();
+      if (error) throw error;
+    } catch (error) {
+      setNotice(error instanceof Error ? `Could not sign out: ${error.message}` : 'Could not sign out.');
+    }
+  };
+
   return <div className="app-shell grid grid-cols-1 lg:grid-cols-[230px_minmax(0,1fr)]">
     <aside className="sidebar">
       <div className="brand"><span>investment tracker<span style={{color:'#8da9ff'}}>.</span></span></div>
@@ -682,7 +1004,7 @@ const removePosition = (ticker: string) => {
       <div><div className="nav-label">PREFERENCES</div><div className="nav-item" onClick={()=>setNotice('Settings and account persistence will be configured in a later step.')} role="button"><span className="nav-icon">⚙</span>Settings</div></div>
     </aside>
     <main className="main min-w-0 p-4 md:p-8">
-      <header className="topbar"><div><div className="eyebrow">INVESTMENT WORKSPACE / OVERVIEW</div><h1 className="page-title">Portfolio overview</h1></div><div className="top-actions"><span className="pill">◷ &nbsp; {new Date().toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'})}</span><button className="button-secondary" type="button" onClick={()=>void refreshQuotes(quoteTickers)} disabled={isRefreshingQuotes}>{isRefreshingQuotes?'Refreshing…':'Refresh prices'}</button><button className="button-primary" onClick={openAddTransaction}>＋ Add transaction</button><div className="avatar">A</div></div></header>
+      <header className="topbar"><div><div className="eyebrow">INVESTMENT WORKSPACE / OVERVIEW</div><h1 className="page-title">Portfolio overview</h1></div><div className="top-actions">{userEmail && <span className="pill">{userEmail}</span>}<span className="pill">◷ &nbsp; {new Date().toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'})}</span><button className="button-secondary" type="button" onClick={()=>void refreshQuotes(quoteTickers)} disabled={isRefreshingQuotes}>{isRefreshingQuotes?'Refreshing…':'Refresh prices'}</button><button className="button-primary" type="button" onClick={openAddTransaction}>＋ Add transaction</button><button className="button-secondary" type="button" onClick={() => void signOut()}>Sign out</button></div></header>
       <div style={{fontSize:11,color:'var(--muted)',marginBottom:15,display:'flex',alignItems:'center',gap:8}}><span style={{width:7,height:7,background:'#e5b765',borderRadius:'50%',display:'inline-block'}}/> {notice}</div>
       <section className="metrics grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         <Metric label="Deposited cash" value={money(totalDeposits)} note={totalReturnPercent === null ? 'Return unavailable' : `${totalReturnPercent >= 0 ? '+' : ''}${totalReturnPercent.toFixed(2)}% total return`} icon="▣" noteTone={totalReturnPercent !== null && totalReturnPercent >= 0?'positive':'negative'} />
@@ -703,7 +1025,7 @@ const removePosition = (ticker: string) => {
         />
         <VerificationCheck
           title="Portfolio check"
-          formula="Portfolio market cost + unrealized P/L"
+          formula="Long: market cost + P/L · Short: entry value"
           calculated={portfolioCheckFormula}
           comparedLabel="Portfolio market value"
           compared={totalPortfolioMarketValue}
@@ -782,13 +1104,13 @@ const removePosition = (ticker: string) => {
               ))
               : <div className="empty">Add a transaction to see allocation.</div>}
           </div>
-          <div style={{borderTop:'1px solid var(--border)',marginTop:20,paddingTop:16,display:'flex',justifyContent:'space-between',fontSize:11}}><span style={{color:'var(--muted)'}}>Number of positions</span><span>{allocation.length}</span></div></div>
+          </div>
       </section>
-      <section className="panel table-panel"><div className="table-head"><div><h2 className="panel-title">Your holdings</h2><div className="panel-subtitle">Quote checks run every minute; Yahoo Finance results are cached for 10 minutes</div></div><div style={{display:'flex',gap:8}}><select className="button-secondary" value={filter} onChange={e=>setFilter(e.target.value)} aria-label="Filter holdings"><option>All assets</option><option>Profitable</option><option>At a loss</option></select><button className="button-secondary" onClick={()=>{ setShowTransactions(v=>!v); setShowDeposits(false); }}>{showTransactions?'Hide history':'Transaction history'} ↗</button><button className="button-secondary" onClick={()=>{ setShowDeposits(v=>!v); setShowTransactions(false); }}>{showDeposits?'Hide deposits':'Deposits'} ↗</button></div></div><div className="table-scroll"><table><thead><tr><th>Asset</th><th>Shares</th><th>Avg. cost</th><th>Last price*</th><th>Investment cost</th><th>Market value</th><th>Unrealized P/L</th><th>Return</th><th>Realized P/L</th><th>Action</th></tr></thead><tbody>{allocation.filter(h=>filter==='All assets'||(filter==='Profitable'?h.unrealizedPL>=0:h.unrealizedPL<0)).map(h=><tr key={h.ticker}><td><div className="ticker-cell"><div className="stock-logo">{h.ticker.slice(0,2)}</div><div><div style={{display:'flex',alignItems:'center',gap:7}}>      <div className="ticker">{h.ticker}</div><small className={`position-side-tag ${h.side.toLowerCase()}`}>{h.side}</small><a className="button-secondary" href={`https://finance.yahoo.com/quote/${encodeURIComponent(h.ticker)}/`} target="_blank" rel="noopener noreferrer" style={{padding:'3px 6px',fontSize:9,lineHeight:1.2}}>View on Yahoo</a></div><div className="company">{h.company}</div><small className="sector-label">{sectors[h.ticker] ?? (isLoadingSectors ? 'Loading sector…' : 'Sector unavailable')}</small></div></div></td><td>{h.quantity.toLocaleString('en-US',{maximumFractionDigits:6})}</td><td>{money(h.averageCost,h.currency)}</td><td title={quotes[h.ticker]?.updatedAt ? `Yahoo Finance update: ${new Date(quotes[h.ticker]?.updatedAt ?? '').toLocaleString()}` : 'Yahoo Finance quote unavailable; using transaction cost as a fallback.'} style={{fontWeight:600}}><div>{money(h.marketPrice,h.currency)}</div>{h.quoteSource !== 'live' && <small className="quote-fallback-label">{isRefreshingQuotes || !portfolioDataLoaded ? 'Loading live quote…' : 'Transaction-price fallback'}</small>}</td><td>{money(h.quantity * h.averageCost,h.currency)}</td><td style={{fontWeight:700}}>{money(h.marketValue,h.currency)}</td><td className={h.unrealizedPL>=0?'positive':'negative'}>{signedMoney(h.unrealizedPL,h.currency)}</td><td><span className={h.unrealizedPL>=0?'tag':'tag'} style={h.unrealizedPL<0?{background:'#3a252c',color:'var(--red)'}:{}}>{h.unrealizedPLPercent>=0?'+':''}{h.unrealizedPLPercent.toFixed(2)}%</span></td><td><input aria-label={`Realized P/L for ${h.ticker}`} type="text" inputMode="decimal" value={money(manualRealizedPL[h.ticker] ?? 0, h.currency)} onFocus={(e) => e.target.select()} onChange={e=>{ const raw = e.target.value.replace(/[^\d.-]/g,''); const numericValue = raw === '' ? 0 : Number(raw); setManualRealizedPL((prev)=>({ ...prev, [h.ticker]: Number.isFinite(numericValue) ? numericValue : 0 })); }} style={{width:90,background:'transparent',border:'1px solid #303746',borderRadius:6,color:(manualRealizedPL[h.ticker] ?? 0) >= 0 ? '#69d7a2' : '#ff7e86',padding:'6px 8px',fontSize:12,textAlign:'right',fontWeight:600,outline:'none'}} /></td><td><div style={{display:'flex',gap:6,justifyContent:'flex-start'}}><button className="button-secondary" onClick={()=>openEditPosition(h.ticker)} style={{padding:'6px 8px',fontSize:10,lineHeight:1.2}} type="button">Edit</button><button className="button-secondary" onClick={()=>removePosition(h.ticker)} type="button">Remove</button></div></td></tr>)}{!allocation.length&&<tr><td colSpan={8} className="empty">No holdings yet. Add a buy transaction to get started.</td></tr>}</tbody></table></div></section>
+      <section className="panel table-panel"><div className="table-head"><div><h2 className="panel-title">Your holdings</h2><div className="panel-subtitle">Quote checks run every minute; Finnhub prices fall back to Yahoo Finance when unavailable</div></div><div style={{display:'flex',gap:8}}><select className="button-secondary" value={filter} onChange={e=>setFilter(e.target.value)} aria-label="Filter holdings"><option>All assets</option><option>Profitable</option><option>At a loss</option></select><button className="button-secondary" onClick={()=>{ setShowTransactions(v=>!v); setShowDeposits(false); }}>{showTransactions?'Hide history':'Transaction history'} ↗</button><button className="button-secondary" onClick={()=>{ setShowDeposits(v=>!v); setShowTransactions(false); }}>{showDeposits?'Hide deposits':'Deposits'} ↗</button></div></div><div className="table-scroll"><table><thead><tr><th>Asset</th><th>Shares</th><th>Avg. cost</th><th>Last price*</th><th>Investment cost</th><th>Market value</th><th>Unrealized P/L</th><th>Return</th><th>Realized P/L</th><th>Action</th></tr></thead><tbody>{allocation.filter(h=>filter==='All assets'||(filter==='Profitable'?h.unrealizedPL>=0:h.unrealizedPL<0)).map(h=><tr key={h.ticker}><td><div className="ticker-cell"><div className="stock-logo">{h.ticker.slice(0,2)}</div><div><div style={{display:'flex',alignItems:'center',gap:7}}>      <div className="ticker">{h.ticker}</div><small className={`position-side-tag ${h.side.toLowerCase()}`}>{h.side}</small><a className="button-secondary" href={`https://finance.yahoo.com/quote/${encodeURIComponent(h.ticker)}/`} target="_blank" rel="noopener noreferrer" style={{padding:'3px 6px',fontSize:9,lineHeight:1.2}}>View on Yahoo</a></div><div className="company">{h.company}</div><small className="sector-label">{sectors[h.ticker] ?? (isLoadingSectors ? 'Loading sector…' : 'Sector unavailable')}</small></div></div></td><td>{h.quantity.toLocaleString('en-US',{maximumFractionDigits:6})}</td><td>{money(h.averageCost,h.currency)}</td><td title={quotes[h.ticker]?.updatedAt ? `Price updated by ${quotes[h.ticker]?.source ?? 'market data provider'}: ${new Date(quotes[h.ticker]?.updatedAt ?? '').toLocaleString()}` : 'Live quote unavailable; using transaction cost as a fallback.'} style={{fontWeight:600}}><div>{money(h.marketPrice,h.currency)}</div>{h.quoteSource === 'sample' && <small className="quote-fallback-label">{isRefreshingQuotes || !portfolioDataLoaded ? 'Loading live quote…' : 'Transaction-price fallback'}</small>}</td><td>{money(h.quantity * h.averageCost,h.currency)}</td><td style={{fontWeight:700}}>{money(h.marketValue,h.currency)}</td><td className={h.unrealizedPL>=0?'positive':'negative'}>{signedMoney(h.unrealizedPL,h.currency)}</td><td><span className={h.unrealizedPL>=0?'tag':'tag'} style={h.unrealizedPL<0?{background:'#3a252c',color:'var(--red)'}:{}}>{h.unrealizedPLPercent>=0?'+':''}{h.unrealizedPLPercent.toFixed(2)}%</span></td><td><input aria-label={`Realized P/L for ${h.ticker}`} type="text" inputMode="decimal" value={money(manualRealizedPL[h.ticker] ?? 0, h.currency)} onFocus={(e) => e.target.select()} onChange={e=>{ const raw = e.target.value.replace(/[^\d.-]/g,''); const numericValue = raw === '' ? 0 : Number(raw); setManualRealizedPL((prev)=>({ ...prev, [h.ticker]: Number.isFinite(numericValue) ? numericValue : 0 })); }} style={{width:90,background:'transparent',border:'1px solid #303746',borderRadius:6,color:(manualRealizedPL[h.ticker] ?? 0) >= 0 ? '#69d7a2' : '#ff7e86',padding:'6px 8px',fontSize:12,textAlign:'right',fontWeight:600,outline:'none'}} /></td><td><div style={{display:'flex',gap:6,justifyContent:'flex-start'}}><button className="button-secondary" onClick={()=>openEditPosition(h.ticker)} style={{padding:'6px 8px',fontSize:10,lineHeight:1.2}} type="button">Edit</button><button className="button-secondary" onClick={()=>removePosition(h.ticker)} type="button">Remove</button></div></td></tr>)}{!allocation.length&&<tr><td colSpan={8} className="empty">No holdings yet. Add a buy transaction to get started.</td></tr>}</tbody></table></div></section>
     
-      {showTransactions&&<section className="panel table-panel" style={{marginTop:16}}><div className="table-head"><div><h2 className="panel-title">Transaction ledger</h2><div className="panel-subtitle">Buys and sells used to calculate positions</div></div><button className="button-primary" onClick={openAddTransaction}>＋ Add</button></div><div className="table-scroll"><table><thead><tr><th>Date</th><th>Asset</th><th>Type</th><th>Quantity</th><th>Price</th><th>Fees</th><th>Action</th></tr></thead><tbody>{[...transactionHistory].sort((a,b)=>b.date.localeCompare(a.date)).map(t=><tr key={t.id}><td>{t.date}</td><td style={{textAlign:'left'}}><b>{t.ticker}</b><div className="company">{t.company}</div></td><td><span className={t.type==='BUY'?'tag':'tag muted-tag'}>{t.type}</span></td><td>{t.quantity}</td><td>{money(t.price,t.currency)}</td><td>{money(t.fees,t.currency)}</td><td><div style={{display:'flex',gap:6}}><button className="button-secondary" onClick={()=>openEditPosition(t.ticker)} type="button">Edit</button><button className="button-secondary" onClick={()=>removeTransaction(t.id)}>Remove</button></div></td></tr>)}</tbody></table></div></section>}
+      {showTransactions&&<section className="panel table-panel" style={{marginTop:16}}><div className="table-head"><div><h2 className="panel-title">Transaction ledger</h2><div className="panel-subtitle">Buys and sells used to calculate positions</div></div><button className="button-primary" type="button" onClick={openAddTransaction}>＋ Add</button></div><div className="table-scroll"><table><thead><tr><th>Date</th><th>Asset</th><th>Type</th><th>Quantity</th><th>Price</th><th>Fees</th><th>Action</th></tr></thead><tbody>{[...transactionHistory].sort((a,b)=>b.date.localeCompare(a.date)).map(t=><tr key={t.id}><td>{t.date}</td><td style={{textAlign:'left'}}><b>{t.ticker}</b><div className="company">{t.company}</div></td><td><span className={t.type==='BUY'?'tag':'tag muted-tag'}>{t.type}</span></td><td>{t.quantity}</td><td>{money(t.price,t.currency)}</td><td>{money(t.fees,t.currency)}</td><td><div style={{display:'flex',gap:6}}><button className="button-secondary" onClick={()=>openEditPosition(t.ticker)} type="button">Edit</button><button className="button-secondary" onClick={()=>removeTransaction(t.id)}>Remove</button></div></td></tr>)}</tbody></table></div></section>}
       {showDeposits&&<section className="panel table-panel" style={{marginTop:16}}><div className="table-head"><div><h2 className="panel-title">Deposits</h2><div className="panel-subtitle">Manual cash deposits by date and value</div></div></div><form className="deposit-form" onSubmit={addDeposit} style={{display:'flex',gap:10,alignItems:'end',padding:'12px 0 16px'}}><div className="field" style={{marginBottom:0,minWidth:140}}><label>Date</label><input type="date" required value={depositForm.date} onChange={e=>setDepositForm({...depositForm,date:e.target.value})}/></div><div className="field" style={{marginBottom:0,minWidth:160}}><label>Value</label><input type="number" min="0.01" step="0.01" required placeholder="2500.00" value={depositForm.value} onChange={e=>setDepositForm({...depositForm,value:e.target.value})}/></div><button className="button-primary" type="submit">＋ Add deposit</button></form><div className="table-scroll"><table><thead><tr><th>Date</th><th>Value</th><th>Action</th></tr></thead><tbody>{deposits.length ? deposits.map(d=> <tr key={d.id}><td>{d.date}</td><td>{money(d.value)}</td><td><button className="button-secondary" onClick={()=>removeDeposit(d.id)} type="button">Remove</button></td></tr>) : <tr><td colSpan={3} style={{textAlign:'center',color:'var(--muted)'}}>No deposits recorded.</td></tr>}</tbody></table></div></section>}
-      <div className="footer-note">Prototype only. Starter transactions are illustrative; position prices are fetched from the quote API when available. Before relying on the figures, implement persistent storage, currency conversion, dividends, corporate actions, and validated quote data.</div>
+      <div className="footer-note">Transactions are saved to your authenticated Supabase account. Position prices are fetched from the quote API when available. Verify all market data and calculations before relying on them.</div>
     </main>
     {showAdd && <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) closeTransactionModal(); }}>
       <div className="modal">
@@ -800,6 +1122,7 @@ const removePosition = (ticker: string) => {
           <button className="button-secondary" onClick={closeTransactionModal}>✕</button>
         </div>
         <form onSubmit={addTransaction}>
+          {transactionFormError && <p className="auth-feedback error" role="alert">{transactionFormError}</p>}
           <div className="form-grid">
             <div className="field">
               <label htmlFor="transaction-date">Date</label>
@@ -807,11 +1130,29 @@ const removePosition = (ticker: string) => {
             </div>
             <div className="field">
               <label htmlFor="transaction-type">Transaction type</label>
-              <select id="transaction-type" value={form.type} onChange={(e) => setForm({...form,type:e.target.value})}>
+              <select id="transaction-type" value={form.type} onChange={(e) => {
+                const type = e.target.value as 'BUY' | 'SELL';
+                setForm({...form,type,cfdCost:type === 'SELL' ? form.cfdCost : ''});
+              }}>
                 <option value="BUY">Buy</option>
                 <option value="SELL">Sell</option>
               </select>
             </div>
+            {form.type === 'SELL' && (
+              <div className="field">
+                <label htmlFor="transaction-cfd-cost">CFD cost</label>
+                <input
+                  id="transaction-cfd-cost"
+                  type="number"
+                  min="0.000001"
+                  step="any"
+                  required
+                  placeholder="Total CFD investment cost"
+                  value={form.cfdCost}
+                  onChange={(e) => setForm({...form,cfdCost:e.target.value})}
+                />
+              </div>
+            )}
             <div className="field">
               <label htmlFor="transaction-ticker">Ticker</label>
               <input
@@ -833,10 +1174,6 @@ const removePosition = (ticker: string) => {
               )}
             </div>
             <div className="field">
-              <label htmlFor="transaction-company">Company name (optional)</label>
-              <input id="transaction-company" placeholder="Microsoft" value={form.company} onChange={(e) => setForm({...form,company:e.target.value})}/>
-            </div>
-            <div className="field">
               <label htmlFor="transaction-quantity">Quantity</label>
               <input id="transaction-quantity" type="number" min="0.000001" step="any" required placeholder="10" value={form.quantity} onChange={(e) => setForm({...form,quantity:e.target.value})}/>
             </div>
@@ -853,14 +1190,15 @@ const removePosition = (ticker: string) => {
               <select id="transaction-currency" value={form.currency} onChange={(e) => setForm({...form,currency:e.target.value})}>
                 <option>USD</option>
                 <option>EUR</option>
+                <option>CHF</option>
                 <option>GBP</option>
                 <option>RON</option>
               </select>
             </div>
           </div>
           <div style={{display:'flex',justifyContent:'flex-end',gap:9,marginTop:22}}>
-            <button type="button" className="button-secondary" onClick={() => setShowAdd(false)}>Cancel</button>
-            <button className="button-primary" type="submit">Save transaction</button>
+            <button type="button" className="button-secondary" onClick={closeTransactionModal} disabled={isSubmittingTransaction}>Cancel</button>
+            <button className="button-primary" type="submit" disabled={isSubmittingTransaction}>{isSubmittingTransaction ? 'Saving…' : 'Save transaction'}</button>
           </div>
           <div className="footer-note">Enter the execution price and fees in the transaction currency. Yahoo Finance looks up the ticker when you leave the ticker field and refreshes it after saving.</div>
         </form>
@@ -868,6 +1206,17 @@ const removePosition = (ticker: string) => {
     </div>}
   </div>;
 }
+
+export default function Home() {
+  const { user, isLoading, error } = useAuth();
+
+  if (isLoading) {
+    return <main className="auth-page"><p className="auth-loading">Restoring your secure session…</p></main>;
+  }
+  if (!user) return <AuthForm authError={error} />;
+  return <PortfolioDashboard key={user.id} userId={user.id} userEmail={user.email ?? null} />;
+}
+
 function VerificationCheck({title,formula,calculated,comparedLabel,compared,difference}:{title:string;formula:string;calculated:number|null;comparedLabel:string;compared:number|null;difference:number|null}) {
   const isBalanced = difference !== null && Math.abs(difference) < 0.01;
   return <div className="verification-check">

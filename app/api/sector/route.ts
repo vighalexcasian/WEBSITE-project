@@ -19,8 +19,14 @@ export async function GET(request: NextRequest) {
     const profile = await yahooFinance.quoteSummary(ticker, { modules: ['assetProfile', 'summaryProfile'] });
     const sector = profile.assetProfile?.sector ?? profile.summaryProfile?.sector;
     const industry = profile.assetProfile?.industry ?? profile.summaryProfile?.industry;
-    if (sector || industry) {
-      return NextResponse.json({ ticker, sector: sector ?? null, industry: industry ?? null });
+    const description = profile.assetProfile?.longBusinessSummary ?? profile.summaryProfile?.longBusinessSummary;
+    if (sector || industry || description) {
+      return NextResponse.json({
+        ticker,
+        sector: sector ?? null,
+        industry: industry ?? null,
+        description: description ?? null,
+      });
     }
   } catch (error) {
     errors.push(error);
@@ -50,7 +56,12 @@ export async function GET(request: NextRequest) {
       const industry = match?.industryDisp ?? match?.industry;
 
       if (sector || industry) {
-        return NextResponse.json({ ticker, sector: sector ?? null, industry: industry ?? null });
+        return NextResponse.json({
+          ticker,
+          sector: sector ?? null,
+          industry: industry ?? null,
+          description: null,
+        });
       }
     } catch (error) {
       errors.push(error);
@@ -58,15 +69,15 @@ export async function GET(request: NextRequest) {
   }
 
   if (errors.length === queries.length + (profileFailed ? 1 : 0)) {
-    console.error(`Failed to fetch Yahoo Finance sector for ${ticker}:`, errors);
+    console.error(`Failed to fetch Yahoo Finance metadata for ${ticker}:`, errors);
     return NextResponse.json(
-      { error: 'Unable to retrieve company sector from Yahoo Finance.' },
+      { error: 'Unable to retrieve company metadata from Yahoo Finance.' },
       { status: 502 }
     );
   }
 
   return NextResponse.json(
-    { ticker, sector: null, error: `Yahoo Finance did not return a sector for ${ticker}.` },
+    { ticker, sector: null, industry: null, description: null, error: `Yahoo Finance did not return company metadata for ${ticker}.` },
     { status: 404 }
   );
 }

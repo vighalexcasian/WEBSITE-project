@@ -18,8 +18,9 @@ export async function GET(request: NextRequest) {
   try {
     const profile = await yahooFinance.quoteSummary(ticker, { modules: ['assetProfile', 'summaryProfile'] });
     const sector = profile.assetProfile?.sector ?? profile.summaryProfile?.sector;
-    if (sector) {
-      return NextResponse.json({ ticker, sector });
+    const industry = profile.assetProfile?.industry ?? profile.summaryProfile?.industry;
+    if (sector || industry) {
+      return NextResponse.json({ ticker, sector: sector ?? null, industry: industry ?? null });
     }
   } catch (error) {
     errors.push(error);
@@ -33,19 +34,23 @@ export async function GET(request: NextRequest) {
     try {
       const results = await yahooFinance.search(query, { quotesCount: 10, newsCount: 0 });
       const yahooQuotes = results.quotes.filter((quote) => quote.isYahooFinance);
-      const exactTicker = yahooQuotes.find((quote) => quote.symbol.toUpperCase() === ticker && (quote.sectorDisp || quote.sector));
+      const exactTicker = yahooQuotes.find((quote) =>
+        quote.symbol.toUpperCase() === ticker &&
+        (quote.sectorDisp || quote.sector || quote.industryDisp || quote.industry)
+      );
       const exactCompany = company
         ? yahooQuotes.find((quote) =>
           [quote.longname, quote.shortname].some((name) =>
             typeof name === 'string' && normalizeName(name) === normalizeName(company)
-          ) && (quote.sectorDisp || quote.sector)
+          ) && (quote.sectorDisp || quote.sector || quote.industryDisp || quote.industry)
         )
         : undefined;
       const match = exactTicker ?? exactCompany;
       const sector = match?.sectorDisp ?? match?.sector;
+      const industry = match?.industryDisp ?? match?.industry;
 
-      if (sector) {
-        return NextResponse.json({ ticker, sector });
+      if (sector || industry) {
+        return NextResponse.json({ ticker, sector: sector ?? null, industry: industry ?? null });
       }
     } catch (error) {
       errors.push(error);

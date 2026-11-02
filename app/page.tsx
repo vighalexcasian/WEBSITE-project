@@ -65,8 +65,10 @@ export default function Home() {
   const [quotes,setQuotes] = useState<Record<string,Quote>>({});
   const [portfolioDataLoaded,setPortfolioDataLoaded] = useState(false);
   const [sectors,setSectors] = useState<Record<string,string | null>>({});
+  const [industries,setIndustries] = useState<Record<string,string | null>>({});
   const [sectorErrors,setSectorErrors] = useState<string[]>([]);
   const [isLoadingSectors,setIsLoadingSectors] = useState(false);
+  const [selectedSector,setSelectedSector] = useState<string | null>(null);
   const [eurUsdRate,setEurUsdRate] = useState<number | null>(null);
   const [isRefreshingQuotes,setIsRefreshingQuotes] = useState(false);
   const [tickerQuoteLookup,setTickerQuoteLookup] = useState<{
@@ -216,6 +218,23 @@ export default function Home() {
       .filter((sector) => sector.value > 0)
       .sort((a, b) => b.value - a.value);
   }, [portfolio.holdings, sectors, convertToUSD]);
+  const selectedIndustryAllocation = useMemo(() => {
+    if (!selectedSector) return [];
+
+    const totals = new Map<string, number>();
+    for (const holding of portfolio.holdings) {
+      if ((sectors[holding.ticker] || 'Sector unavailable') !== selectedSector) continue;
+      const marketValue = convertToUSD(holding.marketValue, holding.currency);
+      if (marketValue === null) return [];
+      const industry = industries[holding.ticker] || 'Industry unavailable';
+      totals.set(industry, (totals.get(industry) ?? 0) + marketValue);
+    }
+
+    return [...totals.entries()]
+      .map(([name, value]) => ({ name, value }))
+      .filter((industry) => industry.value > 0)
+      .sort((a, b) => b.value - a.value);
+  }, [selectedSector, portfolio.holdings, sectors, industries, convertToUSD]);
   const totalDeposits = useMemo(
     () => deposits.reduce((sum, deposit) => sum + deposit.value, 0),
     [deposits]
@@ -433,6 +452,7 @@ export default function Home() {
 
     if (holdings.length === 0) {
       setSectors({});
+      setIndustries({});
       setSectorErrors([]);
       setIsLoadingSectors(false);
       return () => {
@@ -446,25 +466,28 @@ export default function Home() {
       try {
         const params = new URLSearchParams({ ticker, company });
         const response = await fetch(`/api/sector?${params.toString()}`, { cache: 'no-store' });
-        const data = await response.json() as { sector?: string | null; error?: string };
+        const data = await response.json() as { sector?: string | null; industry?: string | null; error?: string };
         if (!response.ok) {
-          return { ticker, sector: null, error: data.error ?? `Request failed (${response.status}).` };
+          return { ticker, sector: null, industry: null, error: data.error ?? `Request failed (${response.status}).` };
         }
         return {
           ticker,
           sector: typeof data.sector === 'string' && data.sector ? data.sector : null,
+          industry: typeof data.industry === 'string' && data.industry ? data.industry : null,
           error: null,
         };
       } catch (error) {
         return {
           ticker,
           sector: null,
+          industry: null,
           error: error instanceof Error ? error.message : 'Unable to fetch sector data.',
         };
       }
     })).then((results) => {
       if (!active) return;
       setSectors(Object.fromEntries(results.map((result) => [result.ticker, result.sector] as const)));
+      setIndustries(Object.fromEntries(results.map((result) => [result.ticker, result.industry] as const)));
       setSectorErrors(results.filter((result) => result.error).map((result) => result.ticker));
       setIsLoadingSectors(false);
     });
@@ -686,8 +709,7 @@ const removePosition = (ticker: string) => {
           compared={totalPortfolioMarketValue}
           difference={portfolioCheckDifference}
         />
-      </section>
-      <section className="content-grid grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.65fr)_minmax(0,1fr)]">
+      </section>      <section className="content-grid grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.65fr)_minmax(0,1fr)]">
         <div className="panel performance-panel"><div className="panel-heading"><div><h2 className="panel-title">Portfolio performance</h2><div className="panel-subtitle">Daily gains rebased to 0% at the last available observation on or before each range starts</div></div><div className="performance-controls"><div style={{display:'flex',gap:8}}>{['3M','6M','1Y'].map((range) => (
           <button
             key={range}
@@ -711,15 +733,31 @@ const removePosition = (ticker: string) => {
               ? <div className="empty">Sector allocation is unavailable until the currency conversion rate loads.</div>
               : sectorAllocation.length > 0
                 ? <div className="sector-chart-layout">
-                  <div className="sector-chart" role="img" aria-label={`Sector allocation: ${sectorAllocation.map((sector) => `${sector.name} ${((sector.value / sectorAllocation.reduce((sum, item) => sum + item.value, 0)) * 100).toFixed(1)}%`).join(', ')}`}>
-                    <ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={sectorAllocation} dataKey="value" nameKey="name" innerRadius="62%" outerRadius="88%" paddingAngle={3} stroke="none">{sectorAllocation.map((sector, index) => <Cell key={sector.name} fill={colors[index % colors.length]} />)}</Pie><Tooltip contentStyle={{background:'#171b25',border:'1px solid #303746',borderRadius:9,fontSize:12,color:'#fff'}} itemStyle={{color:'#fff'}} labelStyle={{color:'#fff'}} formatter={(value, name) => [`${((Number(value) / sectorAllocation.reduce((sum, item) => sum + item.value, 0)) * 100).toFixed(1)}%`, name]} /></PieChart></ResponsiveContainer>
+                  <div className="sector-chart" role="group" aria-label={`Sector allocation: ${sectorAllocation.map((sector) => `${sector.name} ${((sector.value / sectorAllocation.reduce((sum, item) => sum + item.value, 0)) * 100).toFixed(1)}%`).join(', ')}`}>
+                    <ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={sectorAllocation} dataKey="value" nameKey="name" innerRadius="62%" outerRadius="88%" paddingAngle={3} stroke="none" onClick={(_, index) => {
+                      const sector = sectorAllocation[index];
+                      if (sector) setSelectedSector((current) => current === sector.name ? null : sector.name);
+                    }}>{sectorAllocation.map((sector, index) => <Cell key={sector.name} fill={colors[index % colors.length]} />)}</Pie><Tooltip contentStyle={{background:'#171b25',border:'1px solid #303746',borderRadius:9,fontSize:12,color:'#fff'}} itemStyle={{color:'#fff'}} labelStyle={{color:'#fff'}} formatter={(value, name) => [`${((Number(value) / sectorAllocation.reduce((sum, item) => sum + item.value, 0)) * 100).toFixed(1)}%`, name]} /></PieChart></ResponsiveContainer>
                   </div>
                   <div className="sector-legend">{sectorAllocation.map((sector, index) => {
                     const total = sectorAllocation.reduce((sum, item) => sum + item.value, 0);
-                    return <div className="sector-legend-item" key={sector.name}><span className="allocation-color" style={{background:colors[index % colors.length]}}/><span className="sector-name">{sector.name}</span><strong>{((sector.value / total) * 100).toFixed(1)}%</strong></div>;
+                    const selected = selectedSector === sector.name;
+                    return <button className={`sector-legend-item sector-legend-button${selected ? ' selected' : ''}`} type="button" key={sector.name} aria-expanded={selected} onClick={() => setSelectedSector((current) => current === sector.name ? null : sector.name)}><span className="allocation-color" style={{background:colors[index % colors.length]}}/><span className="sector-name">{sector.name}</span><strong>{((sector.value / total) * 100).toFixed(1)}%</strong></button>;
                   })}</div>
                 </div>
                 : <div className="empty">No sector market values are available.</div>}
+            {selectedSector && sectorAllocation.some((sector) => sector.name === selectedSector) && <section className="industry-breakdown" aria-label={`${selectedSector} industry distribution`}>
+              <div className="industry-breakdown-heading">
+                <div><h3 className="allocation-section-title">{selectedSector} industries</h3><div className="panel-subtitle">Share of this sector’s market value</div></div>
+                <button className="button-secondary industry-close" type="button" onClick={() => setSelectedSector(null)} aria-label="Close industry distribution">×</button>
+              </div>
+              {selectedIndustryAllocation.length > 0
+                ? <div className="industry-list">{selectedIndustryAllocation.map((industry, index) => {
+                  const total = selectedIndustryAllocation.reduce((sum, item) => sum + item.value, 0);
+                  return <div className="industry-item" key={industry.name}><div className="industry-item-heading"><span><span className="allocation-color" style={{background:colors[index % colors.length]}} />{industry.name}</span><strong>{((industry.value / total) * 100).toFixed(1)}%</strong></div><div className="track"><div className="track-fill" style={{width:`${(industry.value / total) * 100}%`,background:colors[index % colors.length]}} /></div></div>;
+                })}</div>
+                : <div className="sector-status" role="status">{isLoadingSectors ? 'Loading industry classifications from Yahoo Finance…' : 'No industry market values are available for this sector.'}</div>}
+            </section>}
             {sectorErrors.length > 0 && <div className="sector-status" role="status">Yahoo Finance could not return sector details for {sectorErrors.join(', ')}.</div>}
             {isLoadingSectors && <div className="sector-status" role="status">Loading sector classifications from Yahoo Finance…</div>}
           </div>}

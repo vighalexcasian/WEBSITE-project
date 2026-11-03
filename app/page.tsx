@@ -51,18 +51,23 @@ const isQuoteRecord = (value: unknown): value is Record<string, Quote> =>
       quote.source === 'frankfurter')
   );
 
-const isPortfolioHistory = (value: unknown): value is PortfolioSnapshot[] =>
-  Array.isArray(value) && value.every((snapshot) =>
-    typeof snapshot === 'object' &&
-    snapshot !== null &&
-    typeof snapshot.date === 'string' &&
-    typeof snapshot.marketValue === 'number' &&
-    typeof snapshot.marketCost === 'number' &&
-    typeof snapshot.unrealizedPL === 'number' &&
-    typeof snapshot.realizedPL === 'number' &&
-    typeof snapshot.totalPL === 'number' &&
-    typeof snapshot.uninvestedCash === 'number'
-  );
+const portfolioSnapshotFromRow = (value: unknown): PortfolioSnapshot => {
+  if (typeof value !== 'object' || value === null) throw new Error('The database returned an invalid portfolio snapshot.');
+  const row = value as Record<string, unknown>;
+  const marketValue = Number(row.market_value);
+  const marketCost = Number(row.market_cost);
+  const unrealizedPL = Number(row.unrealized_pl);
+  const realizedPL = Number(row.realized_pl);
+  const totalPL = Number(row.total_pl);
+  const uninvestedCash = Number(row.uninvested_cash);
+  if (
+    typeof row.date !== 'string' ||
+    ![marketValue, marketCost, unrealizedPL, realizedPL, totalPL, uninvestedCash].every(Number.isFinite)
+  ) {
+    throw new Error('The database returned a portfolio snapshot with invalid fields.');
+  }
+  return { date: row.date, marketValue, marketCost, unrealizedPL, realizedPL, totalPL, uninvestedCash };
+};
 
 const transactionFromRow = (value: unknown): Transaction => {
   if (typeof value !== 'object' || value === null) throw new Error('The database returned an invalid transaction.');
@@ -101,6 +106,7 @@ function PortfolioDashboard({ userId, userEmail }: { userId: string; userEmail: 
   const [transactionHistory,setTransactionHistory] = useState<Transaction[]>([]);
   const [quotes,setQuotes] = useState<Record<string,Quote>>({});
   const [portfolioDataLoaded,setPortfolioDataLoaded] = useState(false);
+  const [portfolioHistoryLoaded,setPortfolioHistoryLoaded] = useState(false);
   const [accountDataLoaded,setAccountDataLoaded] = useState(false);
   const [sectors,setSectors] = useState<Record<string,string | null>>({});
   const [industries,setIndustries] = useState<Record<string,string | null>>({});
@@ -173,6 +179,7 @@ function PortfolioDashboard({ userId, userEmail }: { userId: string; userEmail: 
   useEffect(() => {
     let active = true;
     setPortfolioDataLoaded(false);
+    setPortfolioHistoryLoaded(false);
     setAccountDataLoaded(false);
 
     const loadPortfolio = async () => {
@@ -249,9 +256,22 @@ function PortfolioDashboard({ userId, userEmail }: { userId: string; userEmail: 
         if (!Array.isArray(data)) throw new Error('The transactions response was invalid.');
 
         const loadedTransactions = data.map(transactionFromRow);
+        const { data: historyRows, error: historyError } = await supabase
+          .from('portfolio_history')
+          .select('date,market_value,market_cost,unrealized_pl,realized_pl,total_pl,uninvested_cash')
+          .eq('user_id', user.id)
+          .order('date', { ascending: true });
+        if (historyError) {
+          console.error('ERROR MESSAGE:', historyError.message, historyError.details, historyError.hint);
+          throw historyError;
+        }
+        if (!Array.isArray(historyRows)) throw new Error('The portfolio history response was invalid.');
+        const loadedHistory = historyRows.map(portfolioSnapshotFromRow);
         if (!active) return;
         setTransactions(loadedTransactions);
         setTransactionHistory(loadedTransactions);
+        setPortfolioHistory(loadedHistory);
+        setPortfolioHistoryLoaded(true);
         setManualCash(cashBalance);
         setDeposits(loadedDeposits);
         setAccountDataLoaded(true);
@@ -265,14 +285,6 @@ function PortfolioDashboard({ userId, userEmail }: { userId: string; userEmail: 
           setNotice(storageError instanceof Error ? `Unable to restore cached quotes: ${storageError.message}` : 'Unable to restore cached quotes.');
         }
 
-        try {
-          const savedHistory = window.localStorage.getItem(`portfolio-history:${user.id}`);
-          const parsedHistory: unknown = savedHistory ? JSON.parse(savedHistory) : [];
-          if (!isPortfolioHistory(parsedHistory)) throw new Error('Saved performance history has an invalid format.');
-          setPortfolioHistory(parsedHistory);
-        } catch (storageError) {
-          setNotice(storageError instanceof Error ? `Unable to restore performance history: ${storageError.message}` : 'Unable to restore performance history.');
-        }
       } catch (error) {
         if (active) {
           setNotice(error instanceof Error ? `Unable to load your portfolio: ${error.message}` : 'Unable to load your portfolio.');
@@ -699,7 +711,7 @@ function PortfolioDashboard({ userId, userEmail }: { userId: string; userEmail: 
   }, [sectorCompanies]);
 
   useEffect(() => {
-    if (!portfolioDataLoaded) return;
+    if (!portfolioDataLoaded || !portfolioHistoryLoaded) return;
     if (
       totalPortfolioMarketValue === null ||
       totalPortfolioMarketCost === null ||
@@ -718,17 +730,50 @@ function PortfolioDashboard({ userId, userEmail }: { userId: string; userEmail: 
       uninvestedCash: manualCash,
     };
 
-    setPortfolioHistory((prev) => {
-      const previous = prev.at(-1);
-      const next = previous && previous.date === dateKey ? [...prev.slice(0, -1), snapshot] : [...prev, snapshot];
-
-      if (typeof window !== 'undefined') {
-        window.localStorage.setItem(`portfolio-history:${userId}`, JSON.stringify(next));
-      }
-
-      return next;
+    setPortfolioHistory((previous) => {
+      const existingIndex = previous.findIndex((point) => point.date === dateKey);
+      if (existingIndex < 0) return [...previous, snapshot].sort((a, b) => a.date.localeCompare(b.date));
+      return previous.map((point, index) => index === existingIndex ? snapshot : point);
     });
-  }, [portfolioDataLoaded, userId, manualCash, totalPortfolioMarketValue, totalPortfolioMarketCost, totalPortfolioUnrealizedPL, totalManualRealizedPL]);
+
+    let active = true;
+    void (async () => {
+      try {
+        const supabase = getSupabaseClient();
+        const { data: { user }, error: userError } = await supabase.auth.getUser();
+        if (userError) {
+          console.error('ERROR MESSAGE:', userError.message);
+          throw userError;
+        }
+        if (!user || user.id !== userId) throw new Error('Your session changed. Please sign in again.');
+
+        const { error } = await supabase
+          .from('portfolio_history')
+          .upsert({
+            user_id: user.id,
+            date: snapshot.date,
+            market_value: snapshot.marketValue,
+            market_cost: snapshot.marketCost,
+            unrealized_pl: snapshot.unrealizedPL,
+            realized_pl: snapshot.realizedPL,
+            total_pl: snapshot.totalPL,
+            uninvested_cash: snapshot.uninvestedCash,
+          }, { onConflict: 'user_id,date' });
+        if (error) {
+          console.error('ERROR MESSAGE:', error.message, error.details, error.hint);
+          throw error;
+        }
+      } catch (error) {
+        if (active) {
+          setNotice(error instanceof Error ? `Could not save portfolio performance: ${error.message}` : 'Could not save portfolio performance.');
+        }
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [portfolioDataLoaded, portfolioHistoryLoaded, userId, manualCash, totalPortfolioMarketValue, totalPortfolioMarketCost, totalPortfolioUnrealizedPL, totalManualRealizedPL]);
 
   useEffect(() => {
     let active = true;

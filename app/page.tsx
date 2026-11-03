@@ -127,9 +127,10 @@ function PortfolioDashboard({ userId, userEmail }: { userId: string; userEmail: 
   const [showTransactions,setShowTransactions] = useState(false);
   const [showDeposits,setShowDeposits] = useState(false);
   const [filter,setFilter] = useState('All assets');
-  const [performanceRange,setPerformanceRange] = useState<'3M'|'6M'|'1Y'>('3M');
+  const [performanceRange,setPerformanceRange] = useState<'3M'|'6M'|'1Y'|'ALL'>('3M');
   const [showBenchmark,setShowBenchmark] = useState(true);
   const [benchmarkHistory,setBenchmarkHistory] = useState<Array<{date:string; value:number}>>([]);
+  const [benchmarkError,setBenchmarkError] = useState<string | null>(null);
   const [portfolioHistory,setPortfolioHistory] = useState<PortfolioSnapshot[]>([]);
   const [notice,setNotice] = useState('Loading live market data…');
   const [editingTicker,setEditingTicker] = useState<string | null>(null);
@@ -474,30 +475,42 @@ function PortfolioDashboard({ userId, userEmail }: { userId: string; userEmail: 
   const portfolioCheckDifference = portfolioCheckFormula === null || totalPortfolioMarketValue === null
     ? null
     : portfolioCheckFormula - totalPortfolioMarketValue;
+  const portfolioStartDate = useMemo(
+    () => portfolioHistory
+      .filter((point) => Number.isFinite(point.marketValue) && point.marketValue > 0)
+      .map((point) => point.date)
+      .sort((a, b) => a.localeCompare(b))[0] ?? null,
+    [portfolioHistory]
+  );
   const visiblePerformanceSeries = useMemo(() => {
+    const todayKey = dateKey(new Date());
     const cutoff = new Date();
     cutoff.setMonth(cutoff.getMonth() - (performanceRange === '3M' ? 3 : performanceRange === '6M' ? 6 : 12));
-    const cutoffKey = dateKey(cutoff);
-    const todayKey = dateKey(new Date());
-    const firstAtOrBefore = <T extends { date: string }>(points: T[]) =>
-      points.filter((point) => point.date <= cutoffKey).at(-1) ?? points.find((point) => point.date >= cutoffKey);
+    const portfolioPoints = portfolioHistory
+      .filter((point) => point.date <= todayKey && Number.isFinite(point.marketValue) && point.marketValue > 0)
+      .sort((a, b) => a.date.localeCompare(b.date));
+    const cutoffKey = performanceRange === 'ALL'
+      ? portfolioPoints[0]?.date ?? todayKey
+      : dateKey(cutoff);
+    const portfolioBase = portfolioPoints.find((point) => point.date >= cutoffKey);
 
     const benchmarkPoints = benchmarkHistory
       .filter((point) => point.date <= todayKey && Number.isFinite(point.value))
       .sort((a, b) => a.date.localeCompare(b.date));
-    const benchmarkBase = firstAtOrBefore(benchmarkPoints);
-    const benchmarkWindow = benchmarkBase
-      ? benchmarkPoints.filter((point) => point.date >= benchmarkBase.date)
+    const benchmarkBase = portfolioBase
+      ? benchmarkPoints.filter((point) => point.date <= portfolioBase.date).at(-1)
+      : undefined;
+    const benchmarkWindow = portfolioBase && benchmarkBase
+      ? [
+          { date: portfolioBase.date, value: benchmarkBase.value },
+          ...benchmarkPoints.filter((point) => point.date > portfolioBase.date),
+        ]
       : [];
     const benchmarkReturns = benchmarkWindow.map((point) => ({
       date: point.date,
       value: benchmarkBase && benchmarkBase.value > 0 ? ((point.value / benchmarkBase.value) - 1) * 100 : null,
     }));
 
-    const portfolioPoints = portfolioHistory
-      .filter((point) => point.date <= todayKey && Number.isFinite(point.marketValue) && point.marketValue > 0)
-      .sort((a, b) => a.date.localeCompare(b.date));
-    const portfolioBase = firstAtOrBefore(portfolioPoints);
     const portfolioWindow = portfolioBase
       ? portfolioPoints.filter((point) => point.date >= portfolioBase.date)
       : [];
@@ -776,12 +789,34 @@ function PortfolioDashboard({ userId, userEmail }: { userId: string; userEmail: 
   }, [portfolioDataLoaded, portfolioHistoryLoaded, userId, manualCash, totalPortfolioMarketValue, totalPortfolioMarketCost, totalPortfolioUnrealizedPL, totalManualRealizedPL]);
 
   useEffect(() => {
+    if (!portfolioHistoryLoaded) return;
     let active = true;
+    const controller = new AbortController();
+    setBenchmarkHistory([]);
+    setBenchmarkError(null);
+    const benchmarkStartDate = portfolioStartDate
+      ? new Date(`${portfolioStartDate}T00:00:00.000Z`)
+      : null;
+    benchmarkStartDate?.setUTCDate(benchmarkStartDate.getUTCDate() - 7);
+    const benchmarkUrl = benchmarkStartDate
+      ? `/api/sp500?from=${encodeURIComponent(dateKey(benchmarkStartDate))}`
+      : '/api/sp500';
 
-    fetch('/api/sp500')
-      .then((response) => {
-        if (!response.ok) throw new Error(`S&P 500 request failed (${response.status}).`);
-        return response.json() as Promise<Array<{ date: string | Date; close: number }>>;
+    fetch(benchmarkUrl, { signal: controller.signal })
+      .then(async (response) => {
+        const data: unknown = await response.json();
+        if (!response.ok) {
+          const errorMessage =
+            typeof data === 'object' &&
+            data !== null &&
+            'error' in data &&
+            typeof data.error === 'string'
+              ? data.error
+              : `Benchmark request failed (${response.status}).`;
+          throw new Error(errorMessage);
+        }
+        if (!Array.isArray(data)) throw new Error('Benchmark history response was invalid.');
+        return data as Array<{ date: string | Date; close: number }>;
       })
       .then((data) => {
         if (!active || !Array.isArray(data)) return;
@@ -793,23 +828,27 @@ function PortfolioDashboard({ userId, userEmail }: { userId: string; userEmail: 
             value: Number(entry.close),
           }))
           .filter((entry) => /^\d{4}-\d{2}-\d{2}$/.test(entry.date))
-          .sort((a, b) => a.date.localeCompare(b.date))
-          .slice(-252);
+          .sort((a, b) => a.date.localeCompare(b.date));
 
         if (loaded.length > 0) {
           setBenchmarkHistory(loaded);
+          setBenchmarkError(null);
+        } else {
+          throw new Error('No usable S&P 500 benchmark observations were returned.');
         }
       })
-      .catch(() => {
-        if (active) {
+      .catch((error: unknown) => {
+        if (active && !(error instanceof DOMException && error.name === 'AbortError')) {
           setBenchmarkHistory([]);
+          setBenchmarkError(error instanceof Error ? error.message : 'Unable to load benchmark history.');
         }
       });
 
     return () => {
       active = false;
+      controller.abort();
     };
-  }, []);
+  }, [portfolioHistoryLoaded, portfolioStartDate]);
   const resetForm = () => {
     setForm({date:new Date().toISOString().slice(0,10),ticker:'',type:'BUY',quantity:'',price:'',fees:'0',currency:'USD',cfdCost:''});
     setTickerQuoteLookup(null);
@@ -1137,12 +1176,12 @@ const removePosition = async (ticker: string) => {
           difference={portfolioCheckDifference}
         />
       </section>      <section className="content-grid grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.65fr)_minmax(0,1fr)]">
-        <div className="panel performance-panel"><div className="panel-heading"><div><h2 className="panel-title">Portfolio performance</h2><div className="panel-subtitle">Daily gains rebased to 0% at the last available observation on or before each range starts</div></div><div className="performance-controls"><div style={{display:'flex',gap:8}}>{['3M','6M','1Y'].map((range) => (
+        <div className="panel performance-panel"><div className="panel-heading"><div><h2 className="panel-title">Portfolio performance</h2><div className="panel-subtitle">All time starts at your first saved portfolio valuation; each series is rebased to 0% at the range start</div></div><div className="performance-controls"><div style={{display:'flex',gap:8}}>{(['3M','6M','1Y','ALL'] as const).map((range) => (
           <button
             key={range}
             className="button-secondary"
             type="button"
-            onClick={() => setPerformanceRange(range as '3M' | '6M' | '1Y')}
+            onClick={() => setPerformanceRange(range)}
             style={{
               padding:'7px 10px',
               fontSize:11,
@@ -1151,9 +1190,9 @@ const removePosition = async (ticker: string) => {
               color: performanceRange === range ? '#edf0f7' : undefined,
             }}
           >
-            {range}
+            {range === 'ALL' ? 'All time' : range}
           </button>
-        ))}</div><button className="button-secondary benchmark-toggle" type="button" aria-pressed={showBenchmark} onClick={() => setShowBenchmark((visible) => !visible)}>S&amp;P 500 {showBenchmark ? 'ON' : 'OFF'}</button></div></div><div className="chart-legend"><span><i className="legend-dot" style={{background:'var(--blue)'}}/>Portfolio gain %</span>{showBenchmark && <span><i className="legend-dot" style={{background:'#7d8aa8'}}/>S&amp;P 500 gain %</span>}</div><div className="chart-wrap"><ResponsiveContainer width="100%" height="100%"><AreaChart data={visiblePerformanceSeries} margin={{top:18,right:4,left:-18,bottom:0}}><defs><linearGradient id="valueGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#8da9ff" stopOpacity={0.26}/><stop offset="100%" stopColor="#8da9ff" stopOpacity={0}/></linearGradient><linearGradient id="benchmarkGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#7d8aa8" stopOpacity={0.18}/><stop offset="100%" stopColor="#7d8aa8" stopOpacity={0}/></linearGradient></defs><CartesianGrid stroke="#252a35" strokeDasharray="3 5" vertical={false}/><XAxis dataKey="date" ticks={performanceMonthTicks} tick={{fill:'#788397',fontSize:10}} axisLine={false} tickLine={false} interval={0} tickFormatter={(value:string)=>new Date(`${value}T00:00:00`).toLocaleDateString('en-US',{month:'short'})}/><YAxis tick={{fill:'#788397',fontSize:10}} axisLine={false} tickLine={false} tickFormatter={v=>`${v >= 0 ? '+' : ''}${Number(v).toFixed(0)}%`}/><Tooltip contentStyle={{background:'#171b25',border:'1px solid #303746',borderRadius:9,fontSize:12}} labelFormatter={(label)=>new Date(`${label}T00:00:00`).toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'})} formatter={(value, name) => [`${Number(value).toFixed(2)}%`, name === 'portfolio' ? 'Portfolio gain %' : 'S&P 500 gain %']} /><Area type="monotone" dataKey="portfolio" stroke="#8da9ff" strokeWidth={2} fill="url(#valueGradient)"/>{showBenchmark && <Area type="monotone" dataKey="benchmark" stroke="#7d8aa8" strokeWidth={2} fill="url(#benchmarkGradient)" strokeDasharray="5 5"/>}</AreaChart></ResponsiveContainer></div></div>
+        ))}</div><button className="button-secondary benchmark-toggle" type="button" aria-pressed={showBenchmark} onClick={() => setShowBenchmark((visible) => !visible)}>S&amp;P 500 {showBenchmark ? 'ON' : 'OFF'}</button></div></div><div className="chart-legend"><span><i className="legend-dot" style={{background:'var(--blue)'}}/>Portfolio gain %</span>{showBenchmark && <span><i className="legend-dot" style={{background:'#7d8aa8'}}/>S&amp;P 500 gain %</span>}</div>{showBenchmark && benchmarkError && <div role="status" style={{color:'var(--red)',fontSize:11,marginTop:8}}>{benchmarkError}</div>}<div className="chart-wrap"><ResponsiveContainer width="100%" height="100%"><AreaChart data={visiblePerformanceSeries} margin={{top:18,right:4,left:-18,bottom:0}}><defs><linearGradient id="valueGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#8da9ff" stopOpacity={0.26}/><stop offset="100%" stopColor="#8da9ff" stopOpacity={0}/></linearGradient><linearGradient id="benchmarkGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#7d8aa8" stopOpacity={0.18}/><stop offset="100%" stopColor="#7d8aa8" stopOpacity={0}/></linearGradient></defs><CartesianGrid stroke="#252a35" strokeDasharray="3 5" vertical={false}/><XAxis dataKey="date" ticks={performanceMonthTicks} tick={{fill:'#788397',fontSize:10}} axisLine={false} tickLine={false} interval={0} tickFormatter={(value:string)=>new Date(`${value}T00:00:00`).toLocaleDateString('en-US',{month:'short'})}/><YAxis tick={{fill:'#788397',fontSize:10}} axisLine={false} tickLine={false} tickFormatter={v=>`${v >= 0 ? '+' : ''}${Number(v).toFixed(0)}%`}/><Tooltip contentStyle={{background:'#171b25',border:'1px solid #303746',borderRadius:9,fontSize:12}} labelFormatter={(label)=>new Date(`${label}T00:00:00`).toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'})} formatter={(value, name) => [`${Number(value).toFixed(2)}%`, name === 'portfolio' ? 'Portfolio gain %' : 'S&P 500 gain %']} /><Area type="monotone" dataKey="portfolio" stroke="#8da9ff" strokeWidth={2} fill="url(#valueGradient)"/>{showBenchmark && <Area type="monotone" dataKey="benchmark" stroke="#7d8aa8" strokeWidth={2} fill="url(#benchmarkGradient)" strokeDasharray="5 5"/>}</AreaChart></ResponsiveContainer></div></div>
         <div className="panel"><div className="panel-heading"><div><h2 className="panel-title">Asset allocation</h2><div className="panel-subtitle">Sector exposure by current market value</div></div><span className="pill">{allocation.length} assets</span></div>
           {allocation.length > 0 && <div className="sector-allocation">
             {totalPortfolioMarketValue === null

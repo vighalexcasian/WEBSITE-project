@@ -500,6 +500,24 @@
     overflow-x: clip;
   }
 
+  .modal-backdrop {
+    display: block;
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    padding: 12px;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .modal {
+    width: 100%;
+    max-height: calc(100vh - 24px);
+    max-height: calc(100dvh - 24px);
+    margin: 0 auto;
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
   .chart-wrap {
     height: 190px;
   }

@@ -412,6 +412,16 @@ function PortfolioDashboard({ userId, userEmail }: { userId: string; userEmail: 
       .sort((a, b) => b.weight - a.weight),
     [portfolio.holdings, totalPortfolioMarketCost, convertToUSD]
   );
+  const filteredHoldings = useMemo(
+    () => allocation.filter((holding) => {
+      if (filter === 'Profitable') return holding.unrealizedPL >= 0;
+      if (filter === 'At a loss') return holding.unrealizedPL < 0;
+      if (filter === 'Long') return holding.side === 'LONG';
+      if (filter === 'Short') return holding.side === 'SHORT';
+      return true;
+    }),
+    [allocation, filter]
+  );
   const sectorCompanies = useMemo(
     () => JSON.stringify(portfolio.holdings
       .map(({ ticker, company }) => ({ ticker, company }))
@@ -1264,17 +1274,11 @@ const removePosition = async (ticker: string) => {
             <button className="button-secondary" onClick={()=>{ setShowDeposits(v=>!v); setShowTransactions(false); }}>{showDeposits?'Hide deposits':'Deposits'} ↗</button>
           </div>
         </div>
-        <div className="table-scroll">
+        <div className="table-scroll holdings-table">
           <table>
-            <thead><tr><th>Asset</th><th>Shares</th><th>Avg. cost</th><th>Last price*</th><th>Investment cost</th><th>Market value</th><th>Unrealized P/L</th><th>Return</th><th>Realized P/L</th><th>Action</th></tr></thead>
+            <thead><tr><th>Asset</th><th>Shares</th><th>Avg. cost</th><th>Last price*</th><th>Investment cost</th><th>Market value</th><th>Unrealized P/L</th><th>Return</th><th>Realized P/L</th><th>Total P/L</th><th>Action</th></tr></thead>
             <tbody>
-              {allocation.filter((holding) => {
-                if (filter === 'Profitable') return holding.unrealizedPL >= 0;
-                if (filter === 'At a loss') return holding.unrealizedPL < 0;
-                if (filter === 'Long') return holding.side === 'LONG';
-                if (filter === 'Short') return holding.side === 'SHORT';
-                return true;
-              }).map(h=><tr key={h.ticker}>
+              {filteredHoldings.map(h=><tr key={h.ticker}>
                 <td><div className="ticker-cell"><div className="stock-logo">{h.ticker.slice(0,2)}</div><div>
                   <div style={{display:'flex',alignItems:'center',gap:7}}><div className="ticker">{h.ticker}</div><small className={`position-side-tag ${h.side.toLowerCase()}`}>{h.side}</small><a className="button-secondary" href={`https://finance.yahoo.com/quote/${encodeURIComponent(h.ticker)}/`} target="_blank" rel="noopener noreferrer" style={{padding:'3px 6px',fontSize:9,lineHeight:1.2}}>View on Yahoo</a></div>
                   <div className="company">{h.company}</div><small className="sector-label">{sectors[h.ticker] ?? (isLoadingSectors ? 'Loading sector…' : 'Sector unavailable')}</small>
@@ -1304,11 +1308,94 @@ const removePosition = async (ticker: string) => {
                   }}
                   style={{width:90,background:'transparent',border:'1px solid #303746',borderRadius:6,color:(manualRealizedPL[h.ticker] ?? 0) >= 0 ? '#69d7a2' : '#ff7e86',padding:'6px 8px',fontSize:12,textAlign:'right',fontWeight:600,outline:'none'}}
                 /></td>
+                <td className={h.unrealizedPL + (manualRealizedPL[h.ticker] ?? 0) >= 0 ? 'positive' : 'negative'}>
+                  {signedMoney(h.unrealizedPL + (manualRealizedPL[h.ticker] ?? 0), h.currency)}
+                </td>
                 <td><div style={{display:'flex',gap:6,justifyContent:'flex-start'}}><button className="button-secondary" onClick={()=>openEditPosition(h.ticker)} style={{padding:'6px 8px',fontSize:10,lineHeight:1.2}} type="button">Edit</button><button className="button-secondary" onClick={()=>removePosition(h.ticker)} type="button">Remove</button></div></td>
               </tr>)}
-              {!allocation.length&&<tr><td colSpan={8} className="empty">No holdings yet. Add a buy transaction to get started.</td></tr>}
+              {!filteredHoldings.length&&<tr><td colSpan={11} className="empty">{allocation.length ? 'No holdings match this filter.' : 'No holdings yet. Add a buy transaction to get started.'}</td></tr>}
             </tbody>
           </table>
+        </div>
+        <div className="holdings-cards">
+          {filteredHoldings.length ? filteredHoldings.map((holding) => {
+            const realizedPL = manualRealizedPL[holding.ticker] ?? 0;
+            const totalPL = holding.unrealizedPL + realizedPL;
+            return (
+              <article className="holding-card" key={holding.ticker}>
+                <div className="holding-card-header">
+                  <div className="holding-card-identity">
+                    <div className="holding-card-title">
+                      <strong>{holding.ticker}</strong>
+                      <small className={`position-side-tag ${holding.side.toLowerCase()}`}>{holding.side}</small>
+                    </div>
+                    <div className="holding-card-company">{holding.company}</div>
+                    <small className="sector-label">{sectors[holding.ticker] ?? (isLoadingSectors ? 'Loading sector…' : 'Sector unavailable')}</small>
+                  </div>
+                  <a
+                    className="button-secondary holding-card-quote-link"
+                    href={`https://finance.yahoo.com/quote/${encodeURIComponent(holding.ticker)}/`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    View on Yahoo
+                  </a>
+                </div>
+                <div className="holding-card-metrics">
+                  <div><span>Shares</span><strong>{holding.quantity.toLocaleString('en-US', { maximumFractionDigits: 6 })}</strong></div>
+                  <div><span>Average cost</span><strong>{money(holding.averageCost, holding.currency)}</strong></div>
+                  <div>
+                    <span>Last price</span>
+                    <strong title={quotes[holding.ticker]?.updatedAt ? `Price updated by ${quotes[holding.ticker]?.source ?? 'market data provider'}: ${new Date(quotes[holding.ticker]?.updatedAt ?? '').toLocaleString()}` : 'Live quote unavailable; using transaction cost as a fallback.'}>
+                      {money(holding.marketPrice, holding.currency)}
+                    </strong>
+                    {holding.quoteSource === 'sample' && <small className="quote-fallback-label">{isRefreshingQuotes || !portfolioDataLoaded ? 'Loading live quote…' : 'Transaction-price fallback'}</small>}
+                  </div>
+                  <div><span>Investment cost</span><strong>{money(holding.quantity * holding.averageCost, holding.currency)}</strong></div>
+                  <div><span>Market value</span><strong>{money(holding.marketValue, holding.currency)}</strong></div>
+                  <div>
+                    <span>Unrealized P/L</span>
+                    <strong className={holding.unrealizedPL >= 0 ? 'positive' : 'negative'}>{signedMoney(holding.unrealizedPL, holding.currency)}</strong>
+                  </div>
+                  <div>
+                    <span>Return</span>
+                    <strong className={holding.unrealizedPLPercent >= 0 ? 'positive' : 'negative'}>
+                      {holding.unrealizedPLPercent >= 0 ? '+' : ''}{holding.unrealizedPLPercent.toFixed(2)}%
+                    </strong>
+                  </div>
+                  <label className="holding-card-realized">
+                    <span>Realized P/L</span>
+                    <input
+                      aria-label={`Realized P/L for ${holding.ticker}`}
+                      type="text"
+                      inputMode="decimal"
+                      value={realizedPLInputText[holding.ticker] ?? money(realizedPL, holding.currency)}
+                      onFocus={(event) => event.currentTarget.select()}
+                      onChange={(event) => setRealizedPLInputText((previous) => ({ ...previous, [holding.ticker]: event.target.value }))}
+                      onBlur={() => commitRealizedPLInput(holding.ticker)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault();
+                          event.currentTarget.blur();
+                        }
+                      }}
+                      style={{color: realizedPL >= 0 ? '#69d7a2' : '#ff7e86'}}
+                    />
+                  </label>
+                  <div>
+                    <span>Total P/L</span>
+                    <strong className={totalPL >= 0 ? 'positive' : 'negative'}>{signedMoney(totalPL, holding.currency)}</strong>
+                  </div>
+                </div>
+                <div className="holding-card-actions">
+                  <button className="button-secondary" onClick={() => openEditPosition(holding.ticker)} type="button">Edit position</button>
+                  <button className="button-secondary" onClick={() => removePosition(holding.ticker)} type="button">Remove</button>
+                </div>
+              </article>
+            );
+          }) : (
+            <div className="empty">{allocation.length ? 'No holdings match this filter.' : 'No holdings yet. Add a buy transaction to get started.'}</div>
+          )}
         </div>
       </section>
     

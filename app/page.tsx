@@ -1258,7 +1258,7 @@ const removePosition = async (ticker: string) => {
           </div>
           <div style={{display:'flex',gap:8}}>
             <select className="button-secondary" value={filter} onChange={e=>setFilter(e.target.value)} aria-label="Filter holdings">
-              <option>All assets</option><option>Profitable</option><option>At a loss</option>
+              <option>All assets</option><option>Profitable</option><option>At a loss</option><option>Long</option><option>Short</option>
             </select>
             <button className="button-secondary" onClick={()=>{ setShowTransactions(v=>!v); setShowDeposits(false); }}>{showTransactions?'Hide history':'Transaction history'} ↗</button>
             <button className="button-secondary" onClick={()=>{ setShowDeposits(v=>!v); setShowTransactions(false); }}>{showDeposits?'Hide deposits':'Deposits'} ↗</button>
@@ -1268,7 +1268,13 @@ const removePosition = async (ticker: string) => {
           <table>
             <thead><tr><th>Asset</th><th>Shares</th><th>Avg. cost</th><th>Last price*</th><th>Investment cost</th><th>Market value</th><th>Unrealized P/L</th><th>Return</th><th>Realized P/L</th><th>Action</th></tr></thead>
             <tbody>
-              {allocation.filter(h=>filter==='All assets'||(filter==='Profitable'?h.unrealizedPL>=0:h.unrealizedPL<0)).map(h=><tr key={h.ticker}>
+              {allocation.filter((holding) => {
+                if (filter === 'Profitable') return holding.unrealizedPL >= 0;
+                if (filter === 'At a loss') return holding.unrealizedPL < 0;
+                if (filter === 'Long') return holding.side === 'LONG';
+                if (filter === 'Short') return holding.side === 'SHORT';
+                return true;
+              }).map(h=><tr key={h.ticker}>
                 <td><div className="ticker-cell"><div className="stock-logo">{h.ticker.slice(0,2)}</div><div>
                   <div style={{display:'flex',alignItems:'center',gap:7}}><div className="ticker">{h.ticker}</div><small className={`position-side-tag ${h.side.toLowerCase()}`}>{h.side}</small><a className="button-secondary" href={`https://finance.yahoo.com/quote/${encodeURIComponent(h.ticker)}/`} target="_blank" rel="noopener noreferrer" style={{padding:'3px 6px',fontSize:9,lineHeight:1.2}}>View on Yahoo</a></div>
                   <div className="company">{h.company}</div><small className="sector-label">{sectors[h.ticker] ?? (isLoadingSectors ? 'Loading sector…' : 'Sector unavailable')}</small>

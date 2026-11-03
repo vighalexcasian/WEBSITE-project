@@ -497,13 +497,60 @@
   }
 
   .verification-heading {
-    align-items: flex-start;
-    gap: 6px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 8px;
+    min-width: 0;
   }
 
-  .verification-values,
+  .verification-heading .panel-title {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .verification-heading .tag {
+    max-width: 100%;
+    justify-self: end;
+    text-align: center;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .verification-values {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .verification-values div,
+  .verification-values div:last-child {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
+    text-align: left;
+  }
+
+  .verification-values strong {
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
   .verification-difference {
-    gap: 6px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+
+  .verification-difference span,
+  .verification-difference strong {
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 
   .top-actions .pill {

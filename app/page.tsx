@@ -1137,11 +1137,11 @@ const removePosition = async (ticker: string) => {
       <header className="topbar"><div><div className="eyebrow">INVESTMENT WORKSPACE / OVERVIEW</div><h1 className="page-title">Portfolio overview</h1></div><div className="top-actions">{userEmail && <span className="pill">{userEmail}</span>}<span className="pill">◷ &nbsp; {new Date().toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'})}</span><button className="button-secondary" type="button" onClick={()=>void refreshQuotes(quoteTickers)} disabled={isRefreshingQuotes}>{isRefreshingQuotes?'Refreshing…':'Refresh prices'}</button><button className="button-primary" type="button" onClick={openAddTransaction}>＋ Add transaction</button><button className="button-secondary" type="button" onClick={() => void signOut()}>Sign out</button></div></header>
       <div style={{fontSize:11,color:'var(--muted)',marginBottom:15,display:'flex',alignItems:'center',gap:8}}><span style={{width:7,height:7,background:'#e5b765',borderRadius:'50%',display:'inline-block'}}/> {notice}</div>
       <section className="metrics grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        <Metric label="Deposited cash" value={money(totalDeposits)} note={totalReturnPercent === null ? 'Return unavailable' : `${totalReturnPercent >= 0 ? '+' : ''}${totalReturnPercent.toFixed(2)}% total return`} icon="▣" noteTone={totalReturnPercent !== null && totalReturnPercent >= 0?'positive':'negative'} />
-        <Metric label="Portfolio market cost" value={totalPortfolioMarketCost === null ? 'FX rate unavailable' : money(totalPortfolioMarketCost)} note="" icon="▢" />
-        <Metric label="Portfolio market value" value={totalPortfolioMarketValue === null ? 'FX rate unavailable' : money(totalPortfolioMarketValue)} note="" icon="◈" />
-        <Metric label="Unrealized profit / loss" value={totalPortfolioUnrealizedPL === null ? 'FX rate unavailable' : signedMoney(totalPortfolioUnrealizedPL)} note="" icon="↗" tone={totalPortfolioUnrealizedPL !== null && totalPortfolioUnrealizedPL>=0?'positive':'negative'} />
-        <Metric label="Realized profit / loss" value={totalManualRealizedPL === null ? 'FX rate unavailable' : signedMoney(totalManualRealizedPL)} note="" icon="⇄" tone={totalManualRealizedPL !== null && totalManualRealizedPL>=0?'positive':'negative'} />
+        <Metric label="Deposited cash" value={money(totalDeposits)} note={totalReturnPercent === null ? 'Return unavailable' : `${totalReturnPercent >= 0 ? '+' : ''}${totalReturnPercent.toFixed(2)}% total return`} noteTone={totalReturnPercent !== null && totalReturnPercent >= 0?'positive':'negative'} />
+        <Metric label="Portfolio market cost" value={totalPortfolioMarketCost === null ? 'FX rate unavailable' : money(totalPortfolioMarketCost)} note="" />
+        <Metric label="Portfolio market value" value={totalPortfolioMarketValue === null ? 'FX rate unavailable' : money(totalPortfolioMarketValue)} note="" />
+        <Metric label="Unrealized profit / loss" value={totalPortfolioUnrealizedPL === null ? 'FX rate unavailable' : signedMoney(totalPortfolioUnrealizedPL)} note="" tone={totalPortfolioUnrealizedPL !== null && totalPortfolioUnrealizedPL>=0?'positive':'negative'} />
+        <Metric label="Realized profit / loss" value={totalManualRealizedPL === null ? 'FX rate unavailable' : signedMoney(totalManualRealizedPL)} note="" tone={totalManualRealizedPL !== null && totalManualRealizedPL>=0?'positive':'negative'} />
         <Metric label="Uninvested cash" value={
           <input
             aria-label="Uninvested cash"
@@ -1512,7 +1512,16 @@ function VerificationCheck({title,formula,calculated,comparedLabel,compared,diff
   const isBalanced = difference !== null && Math.abs(difference) < 0.01;
   return <div className="verification-check">
     <div className="verification-heading">
-      <h2 className="panel-title">{title}</h2>
+      <div className="verification-title">
+        <h2 className="panel-title">{title}</h2>
+        <span
+          className={`verification-status ${isBalanced ? 'balanced' : 'unbalanced'}`}
+          role="img"
+          aria-label={isBalanced ? 'Balanced' : difference === null ? 'Check unavailable' : 'Not balanced'}
+        >
+          {isBalanced ? '✓' : '!'}
+        </span>
+      </div>
       <span className={`tag ${isBalanced ? '' : 'muted-tag'}`} style={isBalanced ? undefined : {background:'#3a252c',color:'var(--red)'}}>
         {difference === null ? 'Unavailable' : isBalanced ? 'Balanced' : 'Difference'}
       </span>
@@ -1531,4 +1540,4 @@ function VerificationCheck({title,formula,calculated,comparedLabel,compared,diff
   </div>;
 }
 
-function Metric({label,value,note,icon,tone,noteTone,valueTone}:{label:string;value:string | number | React.ReactNode;note:string;icon?:string;tone?:string;noteTone?:string;valueTone?:string}){return <div className="metric"><div className="metric-label"><span>{label}</span>{icon ? <span style={{fontSize:16,color:'var(--muted)'}}>{icon}</span> : null}</div><div className={`metric-value ${valueTone ?? tone ?? ''}`}>{value}</div><div className={`metric-note ${noteTone ?? ''}`} style={noteTone ? { color: noteTone === 'positive' ? 'var(--green)' : 'var(--red)' } : undefined}>{note}</div></div>}
+function Metric({label,value,note,tone,noteTone,valueTone}:{label:string;value:string | number | React.ReactNode;note:string;tone?:string;noteTone?:string;valueTone?:string}){return <div className="metric"><div className="metric-label"><span>{label}</span></div><div className={`metric-value ${valueTone ?? tone ?? ''}`}>{value}</div><div className={`metric-note ${noteTone ?? ''}`} style={noteTone ? { color: noteTone === 'positive' ? 'var(--green)' : 'var(--red)' } : undefined}>{note}</div></div>}

@@ -20,10 +20,17 @@ load_dotenv(Path(__file__).with_name(".env"))
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+raw_origins = os.getenv(
+    "ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"
+)
+allowed_origins = [
+    origin.strip() for origin in raw_origins.split(",") if origin.strip()
+]
+
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -178,6 +185,11 @@ def _generate_summary(
             status_code=502, detail="Gemini returned an empty risk report."
         )
     return summary.strip()
+
+
+@app.get("/")
+def root():
+    return {"status": "ok", "service": "investment-tracker-api"}
 
 
 @app.get("/health")

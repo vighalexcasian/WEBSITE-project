@@ -40,6 +40,40 @@ const readHoldings = (value) => {
   });
 };
 
+const resolveBackendUrl = (configuredUrl) => {
+  const rawUrl = configuredUrl.trim();
+  let url;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new Error('RISK_ANALYSIS_API_URL must be an absolute HTTP(S) URL.');
+  }
+
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error('RISK_ANALYSIS_API_URL must use HTTP or HTTPS.');
+  }
+  if (
+    process.env.NODE_ENV === 'production' &&
+    ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname.toLowerCase())
+  ) {
+    throw new Error('RISK_ANALYSIS_API_URL cannot use a loopback address in production. Set it to the deployed FastAPI service URL.');
+  }
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error('RISK_ANALYSIS_API_URL must not contain credentials, a query, or a fragment.');
+  }
+
+  const pathname = url.pathname.replace(/\/+$/, '');
+  if (/\/api\/analyze$/i.test(pathname)) {
+    url.pathname = pathname;
+  } else if (/\/api$/i.test(pathname)) {
+    url.pathname = `${pathname}/analyze`;
+  } else {
+    url.pathname = `${pathname}/api/analyze`;
+  }
+
+  return url.toString();
+};
+
 export async function POST(request) {
   try {
     const authorization = request.headers.get('authorization');
@@ -62,46 +96,92 @@ export async function POST(request) {
     const body = await request.json();
     const holdings = readHoldings(body?.holdings);
 
-    // Automatically normalize backend URL to safely handle root base urls or full paths
-    const rawEnvUrl = process.env.RISK_ANALYSIS_API_URL || 'http://127.0.0.1:8000';
-    const backendUrl = rawEnvUrl.endsWith('/api/analyze')
-      ? rawEnvUrl
-      : `${rawEnvUrl.replace(/\/+$/, '')}/api/analyze`;
+    const configuredBackendUrl = process.env.RISK_ANALYSIS_API_URL?.trim();
+    if (!configuredBackendUrl && process.env.NODE_ENV === 'production') {
+      return NextResponse.json(
+        { error: 'RISK_ANALYSIS_API_URL is not set in production. Set it to the deployed FastAPI service URL in Render.' },
+        { status: 500 },
+      );
+    }
+    const backendUrl = resolveBackendUrl(configuredBackendUrl || 'http://127.0.0.1:8000');
 
-    const backendResponse = await fetch(backendUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        tickers: [...new Set(holdings.map((holding) => holding.ticker))],
-        holdings,
-      }),
-      cache: 'no-store',
-      signal: AbortSignal.timeout(90000),
-    });
+    let backendResponse;
+    try {
+      backendResponse = await fetch(backendUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tickers: [...new Set(holdings.map((holding) => holding.ticker))],
+          holdings,
+        }),
+        cache: 'no-store',
+        signal: AbortSignal.timeout(90000),
+      });
+    } catch (error) {
+      console.error('Risk-analysis backend request failed:', {
+        url: backendUrl,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
 
     const responseText = await backendResponse.text();
-    let analysisData;
+    const contentType = backendResponse.headers.get('content-type') || 'unknown content type';
+    let analysisData = null;
     try {
       analysisData = JSON.parse(responseText);
     } catch {
-      throw new Error(`The risk analysis service returned an invalid response (${backendResponse.status}).`);
+      if (backendResponse.ok) {
+        console.error('Risk-analysis backend returned a non-JSON success response:', {
+          url: backendUrl,
+          status: backendResponse.status,
+          contentType,
+        });
+        return NextResponse.json(
+          { error: `The risk analysis service returned HTTP ${backendResponse.status} with ${contentType}, not JSON. Check the FastAPI route and deployment configuration.` },
+          { status: 502 },
+        );
+      }
     }
 
     if (!backendResponse.ok) {
-      const backendMessage = typeof analysisData?.detail === 'string'
-        ? analysisData.detail
-        : typeof analysisData?.error === 'string'
-          ? analysisData.error
-          : `The risk analysis service failed (${backendResponse.status}).`;
-      return NextResponse.json({ error: backendMessage }, { status: 502 });
+      const detail = analysisData?.detail;
+      const backendMessage = typeof detail === 'string'
+        ? detail
+        : Array.isArray(detail)
+          ? detail.map((item) => typeof item?.msg === 'string' ? item.msg : JSON.stringify(item)).join('; ')
+          : typeof analysisData?.error === 'string'
+            ? analysisData.error
+            : '';
+      const pathHint = backendResponse.status === 404
+        ? ' Verify RISK_ANALYSIS_API_URL is the FastAPI base URL or the exact /api/analyze endpoint.'
+        : '';
+      const errorMessage = backendMessage || `The risk analysis service returned HTTP ${backendResponse.status} (${contentType}).`;
+      console.error('Risk-analysis backend returned an error:', {
+        url: backendUrl,
+        status: backendResponse.status,
+        contentType,
+        response: responseText.slice(0, 500),
+      });
+      return NextResponse.json({ error: `${errorMessage}${pathHint}` }, { status: 502 });
+    }
+
+    if (!analysisData || typeof analysisData !== 'object' || Array.isArray(analysisData)) {
+      return NextResponse.json(
+        { error: `The risk analysis service returned an invalid JSON object from ${backendUrl}.` },
+        { status: 502 },
+      );
     }
 
     return NextResponse.json(analysisData);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to generate the risk report.';
     const isConnectionError = error instanceof TypeError && message.toLowerCase().includes('fetch');
-    const status = isConnectionError
-      ? 503
+    const isConfigurationError = message.includes('RISK_ANALYSIS_API_URL');
+    const status = isConfigurationError
+      ? 500
+      : isConnectionError
+        ? 503
       : error instanceof SyntaxError || message.includes('holding') || message.includes('Provide')
       ? 400
       : message.toLowerCase().includes('timeout') || message.toLowerCase().includes('timed out') || message.includes('aborted')

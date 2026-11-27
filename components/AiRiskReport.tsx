@@ -172,7 +172,15 @@ export function AiRiskReport({ holdings }: { holdings: AiRiskHolding[] }) {
         body: JSON.stringify({ holdings }),
         cache: 'no-store',
       });
-      const payload: unknown = await response.json();
+      const responseText = await response.text();
+      let payload: unknown;
+      try {
+        payload = JSON.parse(responseText);
+      } catch {
+        throw new Error(
+          `Risk analysis request returned HTTP ${response.status} with a non-JSON response. Check the Next.js API deployment.`,
+        );
+      }
 
       if (!response.ok) {
         const message = isRecord(payload) && typeof payload.error === 'string'

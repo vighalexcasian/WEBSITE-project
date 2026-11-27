@@ -22,6 +22,17 @@ The app loads and writes transactions, cash settings, and deposits using the aut
 
 Set `FINNHUB_API_KEY` in `.env.local` for server-side quote and benchmark requests. Do not expose this key with a `NEXT_PUBLIC_` prefix. Finnhub supplies live stock quotes and benchmark candles (SPY is used as an S&P 500 proxy); Yahoo Finance supplies company sector, industry, and profile metadata.
 
+## AI risk report
+The Risk analytics page sends the signed-in user's current holdings to the Next.js `/api/risk-analysis` proxy. Start the FastAPI/Gemini service from the project root in a second terminal:
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn main:app --app-dir ai-engine --host 127.0.0.1 --port 8000
+```
+
+Set `GEMINI_API_KEY` in `ai-engine/.env`. Set `RISK_ANALYSIS_API_URL` in the Next.js `.env.local` only if the FastAPI endpoint is not at the default `http://127.0.0.1:8000/api/analyze`. Restart both services after changing environment variables. The proxy sends a sanitized holdings array. An empty portfolio can still generate an AI account-status summary, but risk metrics are unavailable until there are active positions.
+
+The analysis service returns JSON containing `executive_summary` (Markdown text) and a `metrics` object with Sharpe ratio, historical 95% daily Value at Risk, beta relative to the S&P 500, and annualized volatility. These metrics use approximately one year of daily Yahoo Finance prices and gross market-value weights. Keep the Gemini API key in the FastAPI service environment, never in the browser or a `NEXT_PUBLIC_` variable.
+
 ## What works in this starter
 - Portfolio overview dashboard
 - Holdings derived from a transaction ledger

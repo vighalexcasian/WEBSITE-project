@@ -5,6 +5,7 @@ import { calculatePortfolio, type Transaction, type Quote } from '@/lib/portfoli
 import { AuthForm } from '@/components/AuthForm';
 import { useAuth } from '@/components/AuthProvider';
 import { getSupabaseClient } from '@/lib/supabase';
+import { AiRiskReport } from '@/components/AiRiskReport';
 
 const colors = ['#8da9ff','#69d7a2','#d6a6ff','#ffc878','#ff8f9a','#80d9e9'];
 const EUR_USD_TICKER = 'EURUSD=X';
@@ -126,6 +127,7 @@ function PortfolioDashboard({ userId, userEmail }: { userId: string; userEmail: 
   const [transactionFormError,setTransactionFormError] = useState<string | null>(null);
   const [showTransactions,setShowTransactions] = useState(false);
   const [showDeposits,setShowDeposits] = useState(false);
+  const [activePage,setActivePage] = useState<'overview'|'risk'>('overview');
   const [filter,setFilter] = useState('All assets');
   const [performanceRange,setPerformanceRange] = useState<'3M'|'6M'|'1Y'|'ALL'>('3M');
   const [showBenchmark,setShowBenchmark] = useState(true);
@@ -412,6 +414,28 @@ function PortfolioDashboard({ userId, userEmail }: { userId: string; userEmail: 
       .sort((a, b) => b.weight - a.weight),
     [portfolio.holdings, totalPortfolioMarketCost, convertToUSD]
   );
+  const riskExposure = useMemo(() => {
+    const positions = portfolio.holdings.map((holding) => ({
+      ticker: holding.ticker,
+      company: holding.company,
+      side: holding.side,
+      value: convertToUSD(holding.marketValue, holding.currency),
+    }));
+    const longExposure = positions.reduce((total, position) =>
+      position.side === 'LONG' && position.value !== null ? total + Math.abs(position.value) : total, 0);
+    const shortExposure = positions.reduce((total, position) =>
+      position.side === 'SHORT' && position.value !== null ? total + Math.abs(position.value) : total, 0);
+    const grossExposure = longExposure + shortExposure;
+    return {
+      positions: positions
+        .filter((position): position is typeof position & { value: number } => position.value !== null)
+        .sort((a, b) => Math.abs(b.value) - Math.abs(a.value)),
+      hasCompleteData: positions.every((position) => position.value !== null),
+      longExposure,
+      shortExposure,
+      grossExposure,
+    };
+  }, [portfolio.holdings, convertToUSD]);
   const filteredHoldings = useMemo(
     () => allocation.filter((holding) => {
       if (filter === 'Profitable') return holding.unrealizedPL >= 0;
@@ -487,17 +511,33 @@ function PortfolioDashboard({ userId, userEmail }: { userId: string; userEmail: 
     : portfolioCheckFormula - totalPortfolioMarketValue;
   const portfolioStartDate = useMemo(
     () => portfolioHistory
-      .filter((point) => Number.isFinite(point.marketValue) && point.marketValue > 0)
+      .filter((point) =>
+        point.marketValue > 0 ||
+        point.marketCost > 0 ||
+        point.uninvestedCash > 0 ||
+        point.totalPL !== 0 ||
+        deposits.some((deposit) => deposit.date <= point.date)
+      )
       .map((point) => point.date)
       .sort((a, b) => a.localeCompare(b))[0] ?? null,
-    [portfolioHistory]
+    [deposits, portfolioHistory]
   );
   const visiblePerformanceSeries = useMemo(() => {
     const todayKey = dateKey(new Date());
     const cutoff = new Date();
     cutoff.setMonth(cutoff.getMonth() - (performanceRange === '3M' ? 3 : performanceRange === '6M' ? 6 : 12));
     const portfolioPoints = portfolioHistory
-      .filter((point) => point.date <= todayKey && Number.isFinite(point.marketValue) && point.marketValue > 0)
+      .filter((point) =>
+        point.date <= todayKey &&
+        [point.marketValue, point.marketCost, point.totalPL, point.uninvestedCash].every(Number.isFinite) &&
+        (
+          point.marketValue > 0 ||
+          point.marketCost > 0 ||
+          point.uninvestedCash > 0 ||
+          point.totalPL !== 0 ||
+          deposits.some((deposit) => deposit.date <= point.date)
+        )
+      )
       .sort((a, b) => a.date.localeCompare(b.date));
     const cutoffKey = performanceRange === 'ALL'
       ? portfolioPoints[0]?.date ?? todayKey
@@ -524,9 +564,17 @@ function PortfolioDashboard({ userId, userEmail }: { userId: string; userEmail: 
     const portfolioWindow = portfolioBase
       ? portfolioPoints.filter((point) => point.date >= portfolioBase.date)
       : [];
+    const depositsAtPortfolioBase = portfolioBase
+      ? deposits.reduce((total, deposit) => deposit.date <= portfolioBase.date ? total + deposit.value : total, 0)
+      : 0;
+    const portfolioCapitalBase = portfolioBase
+      ? depositsAtPortfolioBase || portfolioBase.marketCost + portfolioBase.uninvestedCash || portfolioBase.marketValue
+      : 0;
     const portfolioReturns = portfolioWindow.map((point) => ({
       date: point.date,
-      value: portfolioBase && portfolioBase.marketValue > 0 ? ((point.marketValue / portfolioBase.marketValue) - 1) * 100 : null,
+      value: portfolioBase && portfolioCapitalBase > 0
+        ? ((point.totalPL - portfolioBase.totalPL) / portfolioCapitalBase) * 100
+        : null,
     }));
 
     const dates = [...new Set([
@@ -546,7 +594,7 @@ function PortfolioDashboard({ userId, userEmail }: { userId: string; userEmail: 
         portfolio: portfolioIndex >= 0 ? portfolioReturns[portfolioIndex].value : null,
       };
     });
-  }, [benchmarkHistory, performanceRange, portfolioHistory]);
+  }, [benchmarkHistory, deposits, performanceRange, portfolioHistory]);
   const performanceMonthTicks = useMemo(() => {
     const months = new Set<string>();
     return visiblePerformanceSeries.flatMap((point) => {
@@ -1130,12 +1178,13 @@ const removePosition = async (ticker: string) => {
   return <div className="app-shell grid grid-cols-1 lg:grid-cols-[230px_minmax(0,1fr)]">
     <aside className="sidebar">
       <div className="brand"><span>investment tracker<span style={{color:'#8da9ff'}}>.</span></span></div>
-      <div><div className="nav-label">WORKSPACE</div><div className="nav-item active"><span className="nav-icon">▦</span>Portfolio overview</div><div className="nav-item" onClick={()=>setNotice('Risk analytics will be added after the portfolio ledger is complete.')} role="button"><span className="nav-icon">◉</span>Risk analytics</div></div>
+      <div><div className="nav-label">WORKSPACE</div><button className={`nav-item ${activePage === 'overview' ? 'active' : ''}`} type="button" aria-current={activePage === 'overview' ? 'page' : undefined} onClick={() => setActivePage('overview')}><span className="nav-icon">▦</span>Portfolio overview</button><button className={`nav-item ${activePage === 'risk' ? 'active' : ''}`} type="button" aria-current={activePage === 'risk' ? 'page' : undefined} onClick={() => setActivePage('risk')}><span className="nav-icon">◉</span>Risk analytics</button></div>
       <div><div className="nav-label">PREFERENCES</div><div className="nav-item" onClick={()=>setNotice('Settings and account persistence will be configured in a later step.')} role="button"><span className="nav-icon">⚙</span>Settings</div></div>
     </aside>
     <main className="main min-w-0 p-4 md:p-8">
-      <header className="topbar"><div><div className="eyebrow">INVESTMENT WORKSPACE / OVERVIEW</div><h1 className="page-title">Portfolio overview</h1></div><div className="top-actions">{userEmail && <span className="pill">{userEmail}</span>}<span className="pill">◷ &nbsp; {new Date().toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'})}</span><button className="button-secondary" type="button" onClick={()=>void refreshQuotes(quoteTickers)} disabled={isRefreshingQuotes}>{isRefreshingQuotes?'Refreshing…':'Refresh prices'}</button><button className="button-primary" type="button" onClick={openAddTransaction}>＋ Add transaction</button><button className="button-secondary" type="button" onClick={() => void signOut()}>Sign out</button></div></header>
+      <header className="topbar"><div><div className="eyebrow">INVESTMENT WORKSPACE / {activePage === 'overview' ? 'OVERVIEW' : 'RISK ANALYTICS'}</div><h1 className="page-title">{activePage === 'overview' ? 'Portfolio overview' : 'Risk analytics'}</h1></div><div className="top-actions">{userEmail && <span className="pill">{userEmail}</span>}<span className="pill">◷ &nbsp; {new Date().toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'})}</span><button className="button-secondary" type="button" onClick={()=>void refreshQuotes(quoteTickers)} disabled={isRefreshingQuotes}>{isRefreshingQuotes?'Refreshing…':'Refresh prices'}</button><button className="button-primary" type="button" onClick={openAddTransaction}>＋ Add transaction</button><button className="button-secondary" type="button" onClick={() => void signOut()}>Sign out</button></div></header>
       <div style={{fontSize:11,color:'var(--muted)',marginBottom:15,display:'flex',alignItems:'center',gap:8}}><span style={{width:7,height:7,background:'#e5b765',borderRadius:'50%',display:'inline-block'}}/> {notice}</div>
+      {activePage === 'overview' ? <>
       <section className="metrics grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         <Metric label="Deposited cash" value={money(totalDeposits)} note={totalReturnPercent === null ? 'Return unavailable' : `${totalReturnPercent >= 0 ? '+' : ''}${totalReturnPercent.toFixed(2)}% total return`} noteTone={totalReturnPercent !== null && totalReturnPercent >= 0?'positive':'negative'} />
         <Metric label="Portfolio market cost" value={totalPortfolioMarketCost === null ? 'FX rate unavailable' : money(totalPortfolioMarketCost)} note="" />
@@ -1186,7 +1235,7 @@ const removePosition = async (ticker: string) => {
           difference={portfolioCheckDifference}
         />
       </section>      <section className="content-grid grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.65fr)_minmax(0,1fr)]">
-        <div className="panel performance-panel"><div className="panel-heading"><div><h2 className="panel-title">Portfolio performance</h2><div className="panel-subtitle">All time starts at your first saved portfolio valuation; each series is rebased to 0% at the range start</div></div><div className="performance-controls"><div style={{display:'flex',gap:8}}>{(['3M','6M','1Y','ALL'] as const).map((range) => (
+        <div className="panel performance-panel"><div className="panel-heading"><div><h2 className="panel-title">Portfolio performance</h2><div className="panel-subtitle">Cumulative account P/L stays continuous during cash-only periods; both series start at 0% for the selected range</div></div><div className="performance-controls"><div style={{display:'flex',gap:8}}>{(['3M','6M','1Y','ALL'] as const).map((range) => (
           <button
             key={range}
             className="button-secondary"
@@ -1202,7 +1251,7 @@ const removePosition = async (ticker: string) => {
           >
             {range === 'ALL' ? 'All time' : range}
           </button>
-        ))}</div><button className="button-secondary benchmark-toggle" type="button" aria-pressed={showBenchmark} onClick={() => setShowBenchmark((visible) => !visible)}>S&amp;P 500 {showBenchmark ? 'ON' : 'OFF'}</button></div></div><div className="chart-legend"><span><i className="legend-dot" style={{background:'var(--blue)'}}/>Portfolio gain %</span>{showBenchmark && <span><i className="legend-dot" style={{background:'#7d8aa8'}}/>S&amp;P 500 gain %</span>}</div>{showBenchmark && benchmarkError && <div role="status" style={{color:'var(--red)',fontSize:11,marginTop:8}}>{benchmarkError}</div>}<div className="chart-wrap"><ResponsiveContainer width="100%" height="100%"><AreaChart data={visiblePerformanceSeries} margin={{top:18,right:4,left:-18,bottom:0}}><defs><linearGradient id="valueGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#8da9ff" stopOpacity={0.26}/><stop offset="100%" stopColor="#8da9ff" stopOpacity={0}/></linearGradient><linearGradient id="benchmarkGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#7d8aa8" stopOpacity={0.18}/><stop offset="100%" stopColor="#7d8aa8" stopOpacity={0}/></linearGradient></defs><CartesianGrid stroke="#252a35" strokeDasharray="3 5" vertical={false}/><XAxis dataKey="date" ticks={performanceMonthTicks} tick={{fill:'#788397',fontSize:10}} axisLine={false} tickLine={false} interval={0} tickFormatter={(value:string)=>new Date(`${value}T00:00:00`).toLocaleDateString('en-US',{month:'short'})}/><YAxis tick={{fill:'#788397',fontSize:10}} axisLine={false} tickLine={false} tickFormatter={v=>`${v >= 0 ? '+' : ''}${Number(v).toFixed(0)}%`}/><Tooltip contentStyle={{background:'#171b25',border:'1px solid #303746',borderRadius:9,fontSize:12}} labelFormatter={(label)=>new Date(`${label}T00:00:00`).toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'})} formatter={(value, name) => [`${Number(value).toFixed(2)}%`, name === 'portfolio' ? 'Portfolio gain %' : 'S&P 500 gain %']} /><Area type="monotone" dataKey="portfolio" stroke="#8da9ff" strokeWidth={2} fill="url(#valueGradient)"/>{showBenchmark && <Area type="monotone" dataKey="benchmark" stroke="#7d8aa8" strokeWidth={2} fill="url(#benchmarkGradient)" strokeDasharray="5 5"/>}</AreaChart></ResponsiveContainer></div></div>
+        ))}</div><button className="button-secondary benchmark-toggle" type="button" aria-pressed={showBenchmark} onClick={() => setShowBenchmark((visible) => !visible)}>S&amp;P 500 {showBenchmark ? 'ON' : 'OFF'}</button></div></div><div className="chart-legend"><span><i className="legend-dot" style={{background:'var(--blue)'}}/>Portfolio gain %</span>{showBenchmark && <span><i className="legend-dot" style={{background:'#7d8aa8'}}/>S&amp;P 500 gain %</span>}</div>{showBenchmark && benchmarkError && <div role="status" style={{color:'var(--red)',fontSize:11,marginTop:8}}>{benchmarkError}</div>}<div className="chart-wrap"><ResponsiveContainer width="100%" height="100%"><AreaChart data={visiblePerformanceSeries} margin={{top:18,right:4,left:-18,bottom:0}}><defs><linearGradient id="valueGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#8da9ff" stopOpacity={0.26}/><stop offset="100%" stopColor="#8da9ff" stopOpacity={0}/></linearGradient><linearGradient id="benchmarkGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#7d8aa8" stopOpacity={0.18}/><stop offset="100%" stopColor="#7d8aa8" stopOpacity={0}/></linearGradient></defs><CartesianGrid stroke="#252a35" strokeDasharray="3 5" vertical={false}/><XAxis dataKey="date" ticks={performanceMonthTicks} tick={{fill:'#788397',fontSize:10}} axisLine={false} tickLine={false} interval={0} tickFormatter={(value:string)=>new Date(`${value}T00:00:00`).toLocaleDateString('en-US',{month:'short'})}/><YAxis tick={{fill:'#788397',fontSize:10}} axisLine={false} tickLine={false} tickFormatter={v=>`${v >= 0 ? '+' : ''}${Number(v).toFixed(0)}%`}/><Tooltip cursor={false} contentStyle={{background:'#171b25',border:'1px solid #303746',borderRadius:9,fontSize:12}} labelFormatter={(label)=>new Date(`${label}T00:00:00`).toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'})} formatter={(value, name) => [`${Number(value).toFixed(2)}%`, name === 'portfolio' ? 'Portfolio gain %' : 'S&P 500 gain %']} /><Area type="monotone" dataKey="portfolio" stroke="#8da9ff" strokeWidth={2} fill="url(#valueGradient)"/>{showBenchmark && <Area type="monotone" dataKey="benchmark" stroke="#7d8aa8" strokeWidth={2} fill="url(#benchmarkGradient)" strokeDasharray="5 5"/>}</AreaChart></ResponsiveContainer></div></div>
         <div className="panel"><div className="panel-heading"><div><h2 className="panel-title">Asset allocation</h2><div className="panel-subtitle">Sector exposure by current market value</div></div><span className="pill">{allocation.length} assets</span></div>
           {allocation.length > 0 && <div className="sector-allocation">
             {totalPortfolioMarketValue === null
@@ -1402,6 +1451,55 @@ const removePosition = async (ticker: string) => {
       {showTransactions&&<section className="panel table-panel" style={{marginTop:16}}><div className="table-head"><div><h2 className="panel-title">Transaction ledger</h2><div className="panel-subtitle">Buys and sells used to calculate positions</div></div><button className="button-primary" type="button" onClick={openAddTransaction}>＋ Add</button></div><div className="table-scroll"><table><thead><tr><th>Date</th><th>Asset</th><th>Type</th><th>Quantity</th><th>Price</th><th>Fees</th><th>Action</th></tr></thead><tbody>{[...transactionHistory].sort((a,b)=>b.date.localeCompare(a.date)).map(t=><tr key={t.id}><td>{t.date}</td><td style={{textAlign:'left'}}><b>{t.ticker}</b><div className="company">{t.company}</div></td><td><span className={t.type==='BUY'?'tag':'tag muted-tag'}>{t.type}</span></td><td>{t.quantity}</td><td>{money(t.price,t.currency)}</td><td>{money(t.fees,t.currency)}</td><td><div style={{display:'flex',gap:6}}><button className="button-secondary" onClick={()=>openEditPosition(t.ticker)} type="button">Edit</button><button className="button-secondary" onClick={()=>removeTransaction(t.id)}>Remove</button></div></td></tr>)}</tbody></table></div></section>}
       {showDeposits&&<section className="panel table-panel" style={{marginTop:16}}><div className="table-head"><div><h2 className="panel-title">Deposits</h2><div className="panel-subtitle">Manual cash deposits by date and value</div></div></div><form className="deposit-form" onSubmit={addDeposit} style={{display:'flex',gap:10,alignItems:'end',padding:'12px 0 16px'}}><div className="field" style={{marginBottom:0,minWidth:140}}><label>Date</label><input type="date" required value={depositForm.date} onChange={e=>setDepositForm({...depositForm,date:e.target.value})}/></div><div className="field" style={{marginBottom:0,minWidth:160}}><label>Value</label><input type="number" min="0.01" step="0.01" required placeholder="2500.00" value={depositForm.value} onChange={e=>setDepositForm({...depositForm,value:e.target.value})}/></div><button className="button-primary" type="submit">＋ Add deposit</button></form><div className="table-scroll"><table><thead><tr><th>Date</th><th>Value</th><th>Action</th></tr></thead><tbody>{deposits.length ? deposits.map(d=> <tr key={d.id}><td>{d.date}</td><td>{money(d.value)}</td><td><button className="button-secondary" onClick={()=>removeDeposit(d.id)} type="button">Remove</button></td></tr>) : <tr><td colSpan={3} style={{textAlign:'center',color:'var(--muted)'}}>No deposits recorded.</td></tr>}</tbody></table></div></section>}
       <div className="footer-note">Transactions are saved to your authenticated Supabase account. Position prices are fetched from the quote API when available. Verify all market data and calculations before relying on them.</div>
+      </> : <div className="risk-page">
+        <section className="risk-hero">
+          <div className="risk-hero-copy">
+            <span className="risk-kicker">PORTFOLIO HEALTH</span>
+            <h2>See what is driving your portfolio risk.</h2>
+            <p>Review position concentration and long/short exposure using your latest available portfolio data.</p>
+            <button className="button-primary" type="button" onClick={() => setActivePage('overview')}>View portfolio overview</button>
+          </div>
+          <div className="risk-hero-mark" aria-hidden="true"><span>◉</span><i/><i/><i/></div>
+        </section>
+        <AiRiskReport holdings={portfolio.holdings} />
+        {portfolio.holdings.length === 0 ? (
+          <section className="panel risk-empty-state">
+            <div className="risk-empty-icon" aria-hidden="true">⌁</div>
+            <h2>No active positions yet</h2>
+            <p>Once you add a holding, this page will show how your market exposure is distributed across positions and sides.</p>
+            <button className="button-primary" type="button" onClick={openAddTransaction}>＋ Add your first position</button>
+          </section>
+        ) : <>
+          <section className="risk-metrics" aria-label="Portfolio risk summary">
+            <div className="risk-stat"><span>Active positions</span><strong>{portfolio.holdings.length}</strong><small>Open holdings in your account</small></div>
+            <div className="risk-stat"><span>Largest position</span><strong>{riskExposure.hasCompleteData && riskExposure.grossExposure > 0 ? `${((Math.abs(riskExposure.positions[0]?.value ?? 0) / riskExposure.grossExposure) * 100).toFixed(1)}%` : '—'}</strong><small>{riskExposure.positions[0]?.ticker ?? 'Market value unavailable'}</small></div>
+            <div className="risk-stat"><span>Long position value</span><strong>{riskExposure.hasCompleteData ? money(riskExposure.longExposure) : 'FX unavailable'}</strong><small>Based on latest available quotes</small></div>
+            <div className="risk-stat"><span>Short position value</span><strong>{riskExposure.hasCompleteData ? money(riskExposure.shortExposure) : 'FX unavailable'}</strong><small>Based on recorded short entry value</small></div>
+          </section>
+          <section className="risk-content-grid">
+            <div className="panel risk-panel">
+              <div className="panel-heading"><div><h2 className="panel-title">Position concentration</h2><div className="panel-subtitle">Share of total displayed position value by holding</div></div><span className="pill">{portfolio.holdings.length} positions</span></div>
+              {riskExposure.positions.length > 0 && riskExposure.grossExposure > 0 ? <div className="risk-position-list">
+                {riskExposure.positions.slice(0, 8).map((position) => {
+                  const share = (Math.abs(position.value) / riskExposure.grossExposure) * 100;
+                  return <div className="risk-position" key={position.ticker}>
+                    <div className="risk-position-heading"><span><strong>{position.ticker}</strong><small>{position.company}</small></span><b>{share.toFixed(1)}%</b></div>
+                    <div className="risk-bar"><span style={{width:`${share}%`}}/></div>
+                    <div className="risk-position-foot"><span>{position.side} · {money(Math.abs(position.value))}</span><span>{position.side === 'LONG' ? 'Long exposure' : 'Short entry value'}</span></div>
+                  </div>;
+                })}
+              </div> : <div className="empty">Position values are unavailable until currency rates load.</div>}
+            </div>
+            <div className="panel risk-panel risk-side-panel">
+              <div><span className="risk-kicker">EXPOSURE MIX</span><h2 className="panel-title">Long and short positions</h2><p className="panel-subtitle">A quick view of recorded position values by direction.</p></div>
+              <div className="risk-side-row"><span><i className="risk-side-dot long"/>Long positions</span><strong>{portfolio.holdings.filter((holding) => holding.side === 'LONG').length}</strong></div>
+              <div className="risk-side-row"><span><i className="risk-side-dot short"/>Short positions</span><strong>{portfolio.holdings.filter((holding) => holding.side === 'SHORT').length}</strong></div>
+              <div className="risk-disclaimer">Risk indicators are descriptive snapshots, not forecasts or investment advice. Short position values use recorded entry value.</div>
+            </div>
+          </section>
+        </>}
+        <div className="footer-note">Values are based on the latest saved holdings and available market quotes. Position concentration is calculated from displayed position value; cash is not included.</div>
+      </div>}
     </main>
     {showAdd && <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) closeTransactionModal(); }}>
       <div className="modal">
